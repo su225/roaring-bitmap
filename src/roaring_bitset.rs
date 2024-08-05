@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 
-const MAX_POSSIBLE_CHUNKS: usize = 1<<16;
 const CHUNK_BITSET_CONTAINER_SIZE: usize = (1<<16) >> 3;
 
 /// `Container` holds the elements of the bitset in a chunk. All
@@ -10,6 +9,9 @@ enum Container {
     Sparse(Vec<u16>),
     Dense([u8; CHUNK_BITSET_CONTAINER_SIZE]),
 }
+
+#[derive(Debug)]
+struct ChunkIndex(u16);
 
 /// `RoaringBitmap` is the implementation of the bitmap supporting
 /// efficient bitset operations. But note that it can only support
@@ -28,7 +30,7 @@ enum Container {
 /// 3. Paper #2 introduces run-length encoding representation.
 #[derive(Debug)]
 pub struct RoaringBitmap {
-    chunks: Vec<Container>,
+    chunks: Vec<(ChunkIndex, Container)>,
 }
 
 impl RoaringBitmap {
@@ -42,20 +44,34 @@ impl RoaringBitmap {
     /// `add` adds the given `item` into the roaring bitset. If the
     /// element already exists then the operation is a no-op.
     pub fn add(&mut self, item: u32) {
-        unimplemented!()
+        let chunk_idx = self.chunk_index(item);
+        let vec_idx = self.maybe_allocate_chunk(chunk_idx);
+        debug_assert!(vec_idx < self.chunks.len());
+
+        let (_, mut c) = self.chunks.get_mut(vec_idx).unwrap();
+        self.add_item_to_chunk_container(&mut c, item, vec_idx);
     }
 
     /// `remove` removes the given `item` from the roaring bitset if it
     /// exists. If it is non-existent, then the operation is a no-op.
     pub fn remove(&mut self, item: u32) {
-        unimplemented!()
+        let chunk_idx = self.chunk_index(item);
+        if let Some(vec_idx) = self.get_chunk(chunk_idx) {
+            debug_assert!(vec_idx < self.chunks.len());
+            let (_, mut c) = self.chunks.get_mut(vec_idx).unwrap();
+            self.remove_item_from_chunk_container(&mut c, item);
+        }
     }
 
     /// `contains` returns true if the `item` is in the roaring bitset
     /// or false otherwise. This is for checking if a given item exists
     /// in the roaring bitset or not.
     pub fn contains(&self, item: u32) -> bool {
-        unimplemented!()
+        let chunk_idx = self.chunk_index(item);
+        let container_elem = self.container_element(item);
+        self.get_chunk(chunk_idx)
+            .map(|idx| self.chunks[idx].1.contains(container_elem))
+            .unwrap_or(false)
     }
 
     /// `len` returns the cardinality of the roaring bitset.
@@ -81,6 +97,32 @@ impl RoaringBitmap {
     /// bitset. If this bitset represented by self is `A` and the other bitset
     /// represented by the `other` parameter is `B` then this computes `A-B`.
     pub fn difference(&self, other: &RoaringBitmap) -> RoaringBitmap {
+        unimplemented!()
+    }
+
+    #[inline]
+    fn chunk_index(&self, item: u32) -> u16 {
+        ((item & 0xffff_ffff_0000_0000) >> 4) as u16
+    }
+
+    #[inline]
+    fn container_element(&self, item: u32) -> u16 {
+        (item & 0x0000_0000_ffff_ffff) as u16
+    }
+
+    fn maybe_allocate_chunk(&self, chunk_index: u16) -> usize {
+        unimplemented!()
+    }
+
+    fn add_item_to_chunk_container(&mut self, chunk_container: &mut Container, item: u32, vec_idx: usize) {
+        unimplemented!()
+    }
+
+    fn remove_item_from_chunk_container(&mut self, chunk_container: &mut Container, item: u32) {
+        unimplemented!()
+    }
+
+    fn get_chunk(&self, chunk_idx: u16) -> Option<usize> {
         unimplemented!()
     }
 }
