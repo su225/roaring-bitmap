@@ -76,7 +76,9 @@ impl RoaringBitmap {
 
     /// `len` returns the cardinality of the roaring bitset.
     pub fn len(&self) -> usize {
-        unimplemented!()
+        self.chunks.iter()
+            .map(|c| c.len())
+            .sum()
     }
 
     /// `union` performs the union of two roaring bitsets. More specifically,
