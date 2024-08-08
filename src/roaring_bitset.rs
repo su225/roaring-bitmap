@@ -9,23 +9,21 @@ const CHUNK_BITSET_CONTAINER_SIZE: usize = (1 << 16) >> 3;
 /// elements in a chunk have their upper 16-bits in common.
 #[derive(Debug)]
 enum Container {
+    Empty,
     Sparse(Vec<u16>),
-    Dense([u8; CHUNK_BITSET_CONTAINER_SIZE]),
+    Dense(Box<[u8; CHUNK_BITSET_CONTAINER_SIZE]>),
 }
 
-#[inline]
-fn chunk_index(item: u32) -> ChunkID {
-    ((item & 0xffff_ffff_0000_0000) >> 4) as u16
-}
-
-#[inline]
-fn container_element(item: u32) -> u16 {
-    (item & 0x0000_0000_ffff_ffff) as u16
+impl Default for Container {
+    fn default() -> Self {
+        Self::Empty
+    }
 }
 
 impl Container {
     fn len(&self) -> usize {
         match self {
+            Container::Empty => 0,
             Container::Sparse(s) => s.len(),
             Container::Dense(d) => {
                 d.iter().map(|b| (0..7_usize).map(|bit_pos| (b >> bit_pos) & 1).sum::<u8>())
@@ -37,6 +35,7 @@ impl Container {
     fn contains(&self, elem: u32) -> bool {
         let e = container_element(elem);
         match self {
+            Container::Empty => false,
             Container::Sparse(s) => s.binary_search_by(|x| x.cmp(&e)).is_ok(),
             Container::Dense(d) => {
                 let byte_pos = (e >> 3) as usize;
@@ -45,6 +44,23 @@ impl Container {
             },
         }
     }
+
+    fn is_sparse(&self) -> bool {
+        match self {
+            Container::Sparse(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[inline]
+fn chunk_index(item: u32) -> ChunkID {
+    ((item & 0xffff_0000) >> 4) as u16
+}
+
+#[inline]
+fn container_element(item: u32) -> u16 {
+    (item & 0x0000_ffff) as u16
 }
 
 type ChunkID = u16;
@@ -84,9 +100,7 @@ impl RoaringBitmap {
         let chunk_idx = chunk_index(item);
         let vec_idx = self.maybe_allocate_chunk(chunk_idx);
         debug_assert!(vec_idx < self.chunks.len());
-
-        let (_, mut c) = self.chunks.get_mut(vec_idx).unwrap();
-        self.add_item_to_chunk_container(&mut c, item, vec_idx);
+        self.add_item_to_chunk_container(item, vec_idx);
     }
 
     /// `remove` removes the given `item` from the roaring bitset if it
@@ -95,8 +109,7 @@ impl RoaringBitmap {
         let chunk_idx = chunk_index(item);
         if let Some(vec_idx) = self.get_chunk(chunk_idx) {
             debug_assert!(vec_idx < self.chunks.len());
-            let &mut (_, mut c) = self.chunks.get_mut(vec_idx).unwrap();
-            self.remove_item_from_chunk_container(&mut c, item);
+            self.remove_item_from_chunk_container(item, vec_idx);
         }
     }
 
@@ -147,47 +160,63 @@ impl RoaringBitmap {
             })
     }
 
-    fn add_item_to_chunk_container(&mut self, chunk_container: &mut Container, item: u32, vec_idx: usize) {
+    fn add_item_to_chunk_container(&mut self, item: u32, vec_idx: usize) {
         let chunk_idx = chunk_index(item);
         let elem = container_element(item);
-        match chunk_container {
-            Container::Sparse(sparse_vec) => {
-                if sparse_vec.len() == MAX_SPARSE_CONTAINER_SIZE {
-                    let mut bitmap = [0u8; CHUNK_BITSET_CONTAINER_SIZE];
-                    self.do_insert_into_bitset(elem, &mut bitmap);
-                    sparse_vec.iter().for_each(|e| self.do_insert_into_bitset(*e, &mut bitmap));
-                    let _ = mem::replace(&mut self.chunks[vec_idx], (chunk_idx, Container::Dense(bitmap)));
-                    return;
+        let mut should_convert_to_dense = false;
+
+        // The scope is to make sure that the chunk_container
+        // borrow is dropped as soon as we are done inserting
+        // the element into the container.
+        {
+            let mut chunk_container = self.chunks.get_mut(vec_idx);
+            if chunk_container.is_none() {
+                return;
+            }
+            let (_, ref mut container) = chunk_container.unwrap();
+            match container {
+                Container::Empty => panic!("unexpected condition: empty container"),
+                Container::Sparse(s) => {
+                    s.binary_search_by(|ci| ci.cmp(&elem))
+                        .unwrap_or_else(|pos_to_insert| {
+                            s.insert(pos_to_insert, elem);
+                            pos_to_insert
+                        });
+                    if s.len() > MAX_SPARSE_CONTAINER_SIZE {
+                        should_convert_to_dense = true;
+                    }
+                },
+                Container::Dense(d) => {
+                    let byte_pos = (elem >> 3) as usize;
+                    let bit_pos = (elem & 0b111) as usize;
+                    d[byte_pos] |= 1<<bit_pos;
+                },
+            }
+        }
+        if should_convert_to_dense {
+            let (prev_chunk_idx, prev_container) = mem::take(&mut self.chunks[vec_idx]);
+            debug_assert!(prev_container.is_sparse());
+            debug_assert!(prev_chunk_idx == chunk_idx);
+            let mut bitset = Box::new([0u8; CHUNK_BITSET_CONTAINER_SIZE]);
+            if let Container::Sparse(p) = prev_container {
+                for e in p.into_iter() {
+                    let byte_pos = (e >> 3) as usize;
+                    let bit_pos = (e & 0b111) as usize;
+                    bitset[byte_pos] |= 1<<bit_pos;
                 }
-                sparse_vec.binary_search_by(|e| e.cmp(&elem))
-                    .unwrap_or_else(|pos_to_insert| {
-                        sparse_vec.insert(pos_to_insert, elem);
-                        pos_to_insert
-                    });
-            },
-            Container::Dense(dense_bitset) => self.do_insert_into_bitset(elem, dense_bitset),
+            }
+            self.chunks[vec_idx] = (chunk_idx, Container::Dense(Box::new(*bitset)));
         }
     }
 
-    fn remove_item_from_chunk_container(&mut self, chunk_container: &mut Container, item: u32) {
+    fn remove_item_from_chunk_container(&mut self, item: u32, vec_idx: usize) {
         let chunk_idx = chunk_index(item);
         let elem = container_element(item);
-        match chunk_container {
-            Container::Sparse(sparse_vec) => {
-                let _ = sparse_vec
-                    .binary_search_by(|f| f.cmp(&elem))
-                    .ok().inspect(|x| {sparse_vec.remove(*x);});
-                if sparse_vec.is_empty() {
-                    self.get_chunk(chunk_idx)
-                        .inspect(|x| {self.chunks.remove(*x);});
-                }
-            },
-            Container::Dense(dense_bitset) => {
-                let byte_pos = (elem >> 3) as usize;
-                let bit_pos = (elem & 0b111);
-                dense_bitset[byte_pos] &= !(1u8<<bit_pos);
-            },
+        let chunk_container = self.chunks.get_mut(vec_idx);
+        if chunk_container.is_none() {
+            return;
         }
+        todo!()
     }
 
     fn do_insert_into_bitset(&mut self, elem: u16, dense_bitset: &mut [u8; CHUNK_BITSET_CONTAINER_SIZE]) {
