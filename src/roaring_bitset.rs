@@ -291,12 +291,16 @@ impl RoaringBitmap {
             let chunk_idx2 = other.chunks[idx2].0;
             if chunk_idx1 < chunk_idx2 {
                 unioned_chunks.push(self.chunks[idx1].clone());
+                idx1 += 1;
             } else if chunk_idx1 > chunk_idx2 {
                 unioned_chunks.push(self.chunks[idx2].clone());
+                idx2 += 1;
             } else {
                 let left: &Container = self.chunks.get(idx1).map(|(_, c)| c).unwrap();
                 let right: &Container = self.chunks.get(idx2).map(|(_, c)| c).unwrap();
                 unioned_chunks.push((chunk_idx1, left.union(right)));
+                idx1 += 1;
+                idx2 += 1;
             }
         }
         for x in idx1..self.chunks.len() {
@@ -324,7 +328,32 @@ impl RoaringBitmap {
     /// bitset. If this bitset represented by self is `A` and the other bitset
     /// represented by the `other` parameter is `B` then this computes `A-B`.
     pub fn difference(&self, other: &RoaringBitmap) -> RoaringBitmap {
-        unimplemented!()
+        let mut idx1 = 0_usize;
+        let mut idx2 = 0_usize;
+        let mut diff_chunks = vec![];
+        while idx1 < self.chunks.len() && idx2 < other.chunks.len() {
+            let (chunk_idx1, c1) = self.chunks.get(idx1).unwrap();
+            let (chunk_idx2, c2) = self.chunks.get(idx2).unwrap();
+            if chunk_idx2 < chunk_idx1 {
+                idx2 += 1;
+                continue;
+            }
+            debug_assert!(chunk_idx1 <= chunk_idx2);
+            if chunk_idx1 < chunk_idx2 {
+                // We know that there are no elements in the other set
+                // which can exist in the current chunk. So we can add
+                // the whole chunk into the result.
+                diff_chunks.push(c1.clone());
+            } else if chunk_idx1 == chunk_idx2 {
+                diff_chunks.push(c1.difference(c2));
+            } else {
+                unreachable!()
+            }
+        }
+        for (_, x) in self.chunks[idx1..] {
+            diff_chunks.push(x.clone());
+        }
+        RoaringBitmap { chunks: diff_chunks }
     }
 
     fn maybe_allocate_chunk(&mut self, chunk_index: ChunkID) -> usize {
