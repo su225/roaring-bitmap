@@ -139,11 +139,11 @@ impl Container {
                 if bitset_len >= MAX_SPARSE_CONTAINER_SIZE {
                     Dense(Box::new(bitset))
                 } else {
-                    let mut sparse_pos = Vec::with_capacity(bitset_len);
-                    for b in 0..bitset.len() {
-                        for i in 0..8 {
-                            if (b & (1 << i)) > 0 {
-                                let bitpos = ((b << 3) | i) as u16;
+                    let mut sparse_pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
+                    for i in 0..bitset.len() {
+                        for j in 0..8 {
+                            if (bitset[i] & (1<<j)) > 0 {
+                                let bitpos = ((i<<3)|j) as u16;
                                 sparse_pos.push(bitpos);
                             }
                         }
@@ -356,7 +356,7 @@ impl RoaringBitmap {
                 idx2 += 1;
             } else {
                 let left: &Container = self.chunks.get(idx1).map(|(_, c)| c).unwrap();
-                let right: &Container = self.chunks.get(idx2).map(|(_, c)| c).unwrap();
+                let right: &Container = other.chunks.get(idx2).map(|(_, c)| c).unwrap();
                 unioned_chunks.push((chunk_idx1, left.union(right)));
                 idx1 += 1;
                 idx2 += 1;
@@ -365,7 +365,7 @@ impl RoaringBitmap {
         for x in idx1..self.chunks.len() {
             unioned_chunks.push(self.chunks[x].clone());
         }
-        for y in idx2..self.chunks.len() {
+        for y in idx2..other.chunks.len() {
             unioned_chunks.push(other.chunks[y].clone());
         }
         RoaringBitmap{ chunks: unioned_chunks }
