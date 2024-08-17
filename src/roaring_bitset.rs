@@ -4,7 +4,7 @@ use std::mem;
 use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
-const CHUNK_BITSET_CONTAINER_SIZE: usize = (1 << 16) >> 3;
+const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
 
 /// `Container` holds the elements of the bitset in a chunk. All
 /// elements in a chunk have their upper 16-bits in common.
@@ -87,11 +87,70 @@ impl Container {
         match (self, right) {
             (Empty, x) => x.clone(),
             (y, Empty) => y.clone(),
-            (Dense(ref x), Dense(ref y)) => todo!(),
-            (Sparse(ref x), Dense(ref y)) => todo!(),
-            (Dense(ref x), Sparse(ref y)) => todo!(),
-            (Dense(ref x), Dense(ref y)) => todo!(),
-            (Sparse(ref x), Sparse(ref y)) => todo!(),
+            (Dense(ref x), Dense(ref y)) => {
+                let mut res = x.clone();
+                for i in 0..CHUNK_BITSET_CONTAINER_SIZE {
+                    res[i] |= y[i];
+                }
+                Dense(res)
+            },
+            (Sparse(ref x), Dense(ref y)) => {
+                let mut res = y.clone();
+                for bitpos in x {
+                    let byte_idx = (bitpos >> 3) as usize;
+                    let bit_idx = bitpos & 0b111;
+                    res[byte_idx] |= 1 << bit_idx;
+                }
+                Dense(res)
+            },
+            (Dense(ref x), Sparse(ref y)) => {
+                let mut res = x.clone();
+                for bitpos in y {
+                    let byte_idx = (bitpos >> 3) as usize;
+                    let bit_idx = bitpos & 0b111;
+                    res[byte_idx] |= 1 << bit_idx;
+                }
+                Dense(res)
+            },
+            (Sparse(ref x), Sparse(ref y)) => {
+                // If we are not sure, we assign a dense bitmap
+                // because we can be sure about the upper bound
+                // on the allocated chunk. If it turns out to be
+                // small, we can then allocate a sparse chunk.
+                let mut bitset = [0_u8; CHUNK_BITSET_CONTAINER_SIZE];
+                let mut set_bit = |pos| {
+                    let byte_pos = (pos >> 3) as usize;
+                    let bit_pos = (pos & 0b111) as u8;
+                    bitset[byte_pos] |= (1 << bit_pos);
+                };
+                x.iter().for_each(&mut set_bit);
+                y.iter().for_each(&mut set_bit);
+                let mut bitset_len = 0;
+                for b in bitset {
+                    for i in 0..8 {
+                        if (b & (1 << i)) > 0 {
+                            bitset_len += 1;
+                        }
+                    }
+                }
+                // If the length of the resulting bitset is greater than
+                // or equal to the length of the maximum sparse container
+                // then we return as is because we started with dense.
+                if bitset_len >= MAX_SPARSE_CONTAINER_SIZE {
+                    Dense(Box::new(bitset))
+                } else {
+                    let mut sparse_pos = Vec::with_capacity(bitset_len);
+                    for b in 0..bitset.len() {
+                        for i in 0..8 {
+                            if (b & (1 << i)) > 0 {
+                                let bitpos = ((b << 3) | i) as u16;
+                                sparse_pos.push(bitpos);
+                            }
+                        }
+                    }
+                    Sparse(sparse_pos)
+                }
+            },
         }
     }
 
@@ -307,7 +366,7 @@ impl RoaringBitmap {
             unioned_chunks.push(self.chunks[x].clone());
         }
         for y in idx2..self.chunks.len() {
-            unioned_chunks.push(self.chunks[y].clone());
+            unioned_chunks.push(other.chunks[y].clone());
         }
         RoaringBitmap{ chunks: unioned_chunks }
     }
@@ -319,7 +378,7 @@ impl RoaringBitmap {
         RoaringBitmap {
             chunks: self.chunks.iter().zip(other.chunks.iter())
                         .filter(|((c1, _), (c2, _))| c1 == c2)
-                        .map(|((c1, x), (_, y))| (c1, x.intersection(y)))
+                        .map(|((c1, x), (_, y))| (*c1, x.intersection(y)))
                         .collect::<Vec<(ChunkID, Container)>>(),
         }
     }
@@ -330,7 +389,7 @@ impl RoaringBitmap {
     pub fn difference(&self, other: &RoaringBitmap) -> RoaringBitmap {
         let mut idx1 = 0_usize;
         let mut idx2 = 0_usize;
-        let mut diff_chunks = vec![];
+        let mut diff_chunks: Vec<(ChunkID, Container)> = vec![];
         while idx1 < self.chunks.len() && idx2 < other.chunks.len() {
             let (chunk_idx1, c1) = self.chunks.get(idx1).unwrap();
             let (chunk_idx2, c2) = self.chunks.get(idx2).unwrap();
@@ -343,15 +402,15 @@ impl RoaringBitmap {
                 // We know that there are no elements in the other set
                 // which can exist in the current chunk. So we can add
                 // the whole chunk into the result.
-                diff_chunks.push(c1.clone());
+                diff_chunks.push((*chunk_idx1, c1.clone()));
             } else if chunk_idx1 == chunk_idx2 {
-                diff_chunks.push(c1.difference(c2));
+                diff_chunks.push((*chunk_idx1, c1.difference(c2)));
             } else {
                 unreachable!()
             }
         }
-        for (_, x) in self.chunks[idx1..] {
-            diff_chunks.push(x.clone());
+        for (c, x) in &self.chunks[idx1..] {
+            diff_chunks.push((*c, x.clone()));
         }
         RoaringBitmap { chunks: diff_chunks }
     }
@@ -522,6 +581,7 @@ impl<'a> Iterator for RoaringBitmapIter<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use pretty_assertions::{assert_eq};
 
     #[test]
     fn test_basic_set_operations() {
@@ -540,7 +600,7 @@ mod test {
     }
 
     #[test]
-    fn test_iterator() {
+    fn test_iterator_sparse() {
         let mut bm = RoaringBitmap::new();
         bm.add(0x0000_1100);
         bm.add(0x0000_001f);
@@ -554,7 +614,37 @@ mod test {
     }
 
     #[test]
-    fn test_set_union() {
+    fn test_iterator_dense() {
+        let mut bm = RoaringBitmap::new();
+        (0..(1<<16)).for_each(|x| bm.add(x));
+
+        let mut iter = bm.into_iter();
+        for expected_elem in 0..(1<<16) {
+            assert_eq!(iter.next(), Some(expected_elem));
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iterator_sparse_and_dense_mixed() {
+        let mut bm = RoaringBitmap::new();
+        (0..(1<<16)).for_each(|x| bm.add(x));
+        bm.add(0x0101_ffff);
+        bm.add(0x0101_dead);
+        bm.add(0x0101_beef);
+
+        let mut iter = bm.into_iter();
+        for expected_elem in 0..(1<<16) {
+            assert_eq!(iter.next(), Some(expected_elem));
+        }
+        assert_eq!(iter.next(), Some(0x0101_beef));
+        assert_eq!(iter.next(), Some(0x0101_dead));
+        assert_eq!(iter.next(), Some(0x0101_ffff));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_set_union_both_sparse() {
         let mut a = RoaringBitmap::new();
         let mut b = RoaringBitmap::new();
 
@@ -566,6 +656,37 @@ mod test {
         let c = a.union(&b);
         let elems = c.into_iter().collect::<Vec<u32>>();
         assert_eq!(vec![10, 20, 100_000], elems);
+    }
+
+    #[test]
+    fn test_set_union_both_dense() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        (0..(1<<16)).for_each(|x| a.add(x as u32));
+        (0..(1<<14)).for_each(|x| b.add(x as u32));
+
+        let c = a.union(&b);
+        assert_eq!((0..(1<<16)).collect::<Vec<u32>>(),
+                   c.into_iter().collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn test_set_union_sparse_and_dense() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        b.add(0xffff_1111_u32);
+        (0..(1<<16)).for_each(|x| a.add(x as u32));
+
+        let c = a.union(&b);
+        let mut c_unioned = ((0..(1<<16)).collect::<Vec<u32>>());
+        c_unioned.push(0xffff_1111);
+
+        let actual_c_unioned = c.into_iter().collect::<Vec<u32>>();
+
+        assert_eq!(c_unioned.len(), actual_c_unioned.len());
+        assert_eq!(c_unioned, actual_c_unioned);
     }
 
     #[test]

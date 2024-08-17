@@ -5,3 +5,6 @@ edition = "2021"
 authors = ["Suchith J N"]
 
 [dependencies]
+
+[dev-dependencies]
+pretty_assertions = "1.4.0"
