@@ -1,13 +1,14 @@
 #![deny(missing_docs)]
 
 use std::mem;
+use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
 const CHUNK_BITSET_CONTAINER_SIZE: usize = (1 << 16) >> 3;
 
 /// `Container` holds the elements of the bitset in a chunk. All
 /// elements in a chunk have their upper 16-bits in common.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Container {
     Empty,
     Sparse(Vec<u16>),
@@ -17,9 +18,9 @@ enum Container {
 impl Container {
     fn len(&self) -> usize {
         match self {
-            Container::Empty => 0,
-            Container::Sparse(s) => s.len(),
-            Container::Dense(d) => {
+            Empty => 0,
+            Sparse(s) => s.len(),
+            Dense(d) => {
                 d.iter().map(|b| (0..7_usize).map(|bit_pos| (b >> bit_pos) & 1).sum::<u8>())
                     .sum::<u8>() as usize
             },
@@ -29,9 +30,9 @@ impl Container {
     fn contains(&self, elem: u32) -> bool {
         let e = container_element(elem);
         match self {
-            Container::Empty => false,
-            Container::Sparse(s) => s.binary_search_by(|x| x.cmp(&e)).is_ok(),
-            Container::Dense(d) => {
+            Empty => false,
+            Sparse(s) => s.binary_search_by(|x| x.cmp(&e)).is_ok(),
+            Dense(d) => {
                 let byte_pos = (e >> 3) as usize;
                 let bit_pos = (e & 0b111) as usize;
                 d[byte_pos] >> bit_pos > 0
@@ -41,8 +42,8 @@ impl Container {
 
     fn into_sparse(self) -> Self {
         match self {
-            Container::Empty => Container::Sparse(vec![]),
-            Container::Dense(bitset) => {
+            Empty => Sparse(vec![]),
+            Dense(bitset) => {
                 let mut bit_pos_vec = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
                 for byte_index in 0..bitset.len() {
                     for bit_pos in 0..8 {
@@ -53,7 +54,7 @@ impl Container {
                         }
                     }
                 }
-                Container::Sparse(bit_pos_vec)
+                Sparse(bit_pos_vec)
             },
             v => v,
         }
@@ -61,15 +62,15 @@ impl Container {
 
     fn into_dense(self) -> Self {
         match self {
-            Container::Empty => Container::Dense(Box::new([0_u8; CHUNK_BITSET_CONTAINER_SIZE])),
-            Container::Sparse(v) => {
+            Empty => Dense(Box::new([0_u8; CHUNK_BITSET_CONTAINER_SIZE])),
+            Sparse(v) => {
                 let mut bitset = Box::new([0_u8; CHUNK_BITSET_CONTAINER_SIZE]);
                 for bit_pos in v.into_iter() {
                     let byte_pos = ((bit_pos) >> 3) as usize;
                     let bit_pos = (bit_pos) & 0b111;
                     bitset[byte_pos] |= 1<<bit_pos;
                 }
-                Container::Dense(bitset)
+                Dense(bitset)
             },
             v => v,
         }
@@ -77,8 +78,41 @@ impl Container {
 
     fn is_sparse(&self) -> bool {
         match self {
-            Container::Sparse(_) => true,
+            Sparse(_) => true,
             _ => false,
+        }
+    }
+
+    fn union(&self, right: &Container) -> Container {
+        match (self, right) {
+            (Empty, x) => x.clone(),
+            (y, Empty) => y.clone(),
+            (Dense(ref x), Dense(ref y)) => todo!(),
+            (Sparse(ref x), Dense(ref y)) => todo!(),
+            (Dense(ref x), Sparse(ref y)) => todo!(),
+            (Dense(ref x), Dense(ref y)) => todo!(),
+            (Sparse(ref x), Sparse(ref y)) => todo!(),
+        }
+    }
+
+    fn intersection(&self, right: &Container) -> Container {
+        match (self, right) {
+            (Empty, _) | (_, Empty) => Empty,
+            (Dense(ref x), Dense(ref y)) => todo!(),
+            (Sparse(ref x), Dense(ref y)) => todo!(),
+            (Dense(ref x), Sparse(ref y)) => todo!(),
+            (Sparse(ref x), Sparse(ref y)) => todo!(),
+        }
+    }
+
+    fn difference(&self, right: &Container) -> Container {
+        match (self, right) {
+            (Empty, _) => Empty,
+            (ref x, Empty) => (*x).clone(),
+            (Sparse(ref x), Sparse(ref y)) => todo!(),
+            (Sparse(ref x), Dense(ref y)) => todo!(),
+            (Dense(ref x), Sparse(ref y)) => todo!(),
+            (Dense(ref x), Dense(ref y)) => todo!(),
         }
     }
 }
@@ -96,9 +130,9 @@ enum ContainerIter<'a> {
 impl<'a> ContainerIter<'a> {
     fn new(container: &'a Container) -> ContainerIter<'a> {
         match container {
-            Container::Empty => ContainerIter::EmptyIter,
-            Container::Sparse(ref v) => ContainerIter::SparseIter(v.iter()),
-            Container::Dense(ref bitset) => ContainerIter::DenseIter {
+            Empty => ContainerIter::EmptyIter,
+            Sparse(ref v) => ContainerIter::SparseIter(v.iter()),
+            Dense(ref bitset) => ContainerIter::DenseIter {
                 bitset, byte_pos: 0, bit_pos: 0,
             }
         }
@@ -164,7 +198,7 @@ impl<'a> IntoIterator for &'a Container {
 
 impl Default for Container {
     fn default() -> Self {
-        Self::Empty
+        Empty
     }
 }
 
@@ -249,14 +283,41 @@ impl RoaringBitmap {
     /// it constructs and returns another `RoaringBitmap` which contains elements
     /// such that for each element e, it belongs to either of the sets (or both)
     pub fn union(&self, other: &RoaringBitmap) -> RoaringBitmap {
-        unimplemented!()
+        let mut idx1 = 0_usize;
+        let mut idx2 = 0_usize;
+        let mut unioned_chunks = vec![];
+        while idx1 < self.chunks.len() && idx2 < other.chunks.len() {
+            let chunk_idx1 = self.chunks[idx1].0;
+            let chunk_idx2 = other.chunks[idx2].0;
+            if chunk_idx1 < chunk_idx2 {
+                unioned_chunks.push(self.chunks[idx1].clone());
+            } else if chunk_idx1 > chunk_idx2 {
+                unioned_chunks.push(self.chunks[idx2].clone());
+            } else {
+                let left: &Container = self.chunks.get(idx1).map(|(_, c)| c).unwrap();
+                let right: &Container = self.chunks.get(idx2).map(|(_, c)| c).unwrap();
+                unioned_chunks.push((chunk_idx1, left.union(right)));
+            }
+        }
+        for x in idx1..self.chunks.len() {
+            unioned_chunks.push(self.chunks[x].clone());
+        }
+        for y in idx2..self.chunks.len() {
+            unioned_chunks.push(self.chunks[y].clone());
+        }
+        RoaringBitmap{ chunks: unioned_chunks }
     }
 
     /// `intersection` performs the set intersection of two roaring bitsets.
     /// More specifically, it constructs and returns another `RoaringBitmap`
     /// which contains elements from both the sets.
     pub fn intersection(&self, other: &RoaringBitmap) -> RoaringBitmap {
-        unimplemented!()
+        RoaringBitmap {
+            chunks: self.chunks.iter().zip(other.chunks.iter())
+                        .filter(|((c1, _), (c2, _))| c1 == c2)
+                        .map(|((c1, x), (_, y))| (c1, x.intersection(y)))
+                        .collect::<Vec<(ChunkID, Container)>>(),
+        }
     }
 
     /// `difference` computes the set difference between this and the `other`
@@ -270,7 +331,7 @@ impl RoaringBitmap {
         self.chunks
             .binary_search_by(|chk| chk.0.cmp(&chunk_index))
             .unwrap_or_else(|pos_to_insert| {
-                self.chunks.insert(pos_to_insert, (chunk_index, Container::Sparse(vec![])));
+                self.chunks.insert(pos_to_insert, (chunk_index, Sparse(vec![])));
                 pos_to_insert
             })
     }
@@ -290,8 +351,8 @@ impl RoaringBitmap {
             }
             let (_, ref mut container) = chunk_container.unwrap();
             match container {
-                Container::Empty => panic!("unexpected condition: empty container"),
-                Container::Sparse(s) => {
+                Empty => panic!("unexpected condition: empty container"),
+                Sparse(s) => {
                     s.binary_search_by(|ci| ci.cmp(&elem))
                         .unwrap_or_else(|pos_to_insert| {
                             s.insert(pos_to_insert, elem);
@@ -301,7 +362,7 @@ impl RoaringBitmap {
                         should_convert_to_dense = true;
                     }
                 },
-                Container::Dense(d) => {
+                Dense(d) => {
                     let byte_pos = (elem >> 3) as usize;
                     let bit_pos = (elem & 0b111) as usize;
                     d[byte_pos] |= 1<<bit_pos;
@@ -328,12 +389,12 @@ impl RoaringBitmap {
             }
             let container = chunk_container.unwrap();
             match container.1 {
-                Container::Empty => {return;}
-                Container::Sparse(ref mut v) => {
+                Empty => {return;}
+                Sparse(ref mut v) => {
                     v.binary_search(&elem)
                         .into_iter().for_each(|idx| {v.remove(idx);});
                 }
-                Container::Dense(ref mut bitset) => {
+                Dense(ref mut bitset) => {
                     let byte_pos = (elem >> 3) as usize;
                     let bit_pos = (elem & 0b111) as usize;
                     bitset[byte_pos] |= 1<<bit_pos;
@@ -471,11 +532,11 @@ mod test {
         a.add(10);
         b.add(20);
         b.add(10);
+        a.add(100_000);
 
         let c = a.union(&b);
-        assert_eq!(c.len(), 2);
-        assert!(c.contains(10));
-        assert!(c.contains(20));
+        let elems = c.into_iter().collect::<Vec<u32>>();
+        assert_eq!(vec![10, 20, 100_000], elems);
     }
 
     #[test]
