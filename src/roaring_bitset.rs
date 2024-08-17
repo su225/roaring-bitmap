@@ -228,10 +228,73 @@ impl Container {
         match (self, right) {
             (Empty, _) => Empty,
             (ref x, Empty) => (*x).clone(),
-            (Sparse(ref x), Sparse(ref y)) => todo!(),
-            (Sparse(ref x), Dense(ref y)) => todo!(),
-            (Dense(ref x), Sparse(ref y)) => todo!(),
-            (Dense(ref x), Dense(ref y)) => todo!(),
+            (Sparse(ref x), Sparse(ref y)) => {
+                let mut bitpos = Vec::with_capacity(x.len());
+                let (mut idx1, mut idx2) = (0_usize, 0_usize);
+                while idx1 < x.len() && idx2 < y.len() {
+                    if x[idx1] < y[idx2] {
+                        // At this point we are sure that there are no
+                        // elements in y which can match x[idx1]. Hence,
+                        // we can safely consider this part of the diff.
+                        bitpos.push(x[idx1]);
+                        idx1 += 1;
+                    } else if x[idx1] > y[idx2] {
+                        // We don't know if there exists some element in
+                        // y which can equal the current element in x. So
+                        // don't add it just yet. Imagine the following
+                        // case where x=[10,20] and y=[1,2,10,20]. Here,
+                        // adding 10 before going all the way to index 2
+                        // (0-based indexing) in y would be incorrect.
+                        idx2 += 1;
+                    } else if x[idx1] == y[idx2] {
+                        // The element is present in both the sets. Hence,
+                        // this clearly doesn't belong to the difference.
+                        idx1 += 1; idx2 += 1;
+                    }
+                }
+                // add the remaining elements (if any) to the difference
+                // 1. If we ran out of elements in x, then we don't do anything
+                // 2. If we have run out of elements in y, then we add the rest
+                //    because we know for sure that they don't belong there.
+                Sparse(bitpos)
+            },
+            (Sparse(ref x), Dense(ref y)) => {
+                Sparse((*x).iter()
+                    .filter(|&p| {
+                        let byte_pos = (p >> 3) as usize;
+                        let bit_pos = (p & 0b111);
+                        (y[byte_pos] & (1 << bit_pos)) == 0
+                    })
+                    .map(|x| *x)
+                    .collect::<Vec<u16>>())
+            },
+            (Dense(ref x), Sparse(ref y)) => {
+                let mut diff_bitset = x.clone();
+                for yp in y {
+                    let byte_pos = (yp >> 3) as usize;
+                    let bit_pos = (yp & 0b111);
+                    let bit_mask = !(1 << bit_pos) as u8;
+                    diff_bitset[byte_pos] &= bit_mask;
+                }
+                let res = Dense(diff_bitset);
+                if res.len() < MAX_SPARSE_CONTAINER_SIZE {
+                    res.into_sparse()
+                } else {
+                    res
+                }
+            },
+            (Dense(ref x), Dense(ref y)) => {
+                let mut diff = x.clone();
+                for i in 0..y.len() {
+                    diff[i] &= !y[i];
+                }
+                let res = Dense(diff);
+                if res.len() < MAX_SPARSE_CONTAINER_SIZE {
+                    res.into_sparse()
+                } else {
+                    res
+                }
+            },
         }
     }
 }
@@ -476,8 +539,11 @@ impl RoaringBitmap {
                 // which can exist in the current chunk. So we can add
                 // the whole chunk into the result.
                 diff_chunks.push((*chunk_idx1, c1.clone()));
+                idx1 += 1;
             } else if chunk_idx1 == chunk_idx2 {
                 diff_chunks.push((*chunk_idx1, c1.difference(c2)));
+                idx1 += 1;
+                idx2 += 1;
             } else {
                 unreachable!()
             }
