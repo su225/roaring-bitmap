@@ -14,12 +14,6 @@ enum Container {
     Dense(Box<[u8; CHUNK_BITSET_CONTAINER_SIZE]>),
 }
 
-impl Default for Container {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
-
 impl Container {
     fn len(&self) -> usize {
         match self {
@@ -89,18 +83,103 @@ impl Container {
     }
 }
 
+enum ContainerIter<'a> {
+    EmptyIter,
+    SparseIter(std::slice::Iter<'a, u16>),
+    DenseIter{
+        bitset: &'a[u8; CHUNK_BITSET_CONTAINER_SIZE],
+        byte_pos: usize,
+        bit_pos: u8,
+    },
+}
+
+impl<'a> ContainerIter<'a> {
+    fn new(container: &'a Container) -> ContainerIter<'a> {
+        match container {
+            Container::Empty => ContainerIter::EmptyIter,
+            Container::Sparse(ref v) => ContainerIter::SparseIter(v.iter()),
+            Container::Dense(ref bitset) => ContainerIter::DenseIter {
+                bitset, byte_pos: 0, bit_pos: 0,
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for ContainerIter<'a> {
+    type Item = u16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ContainerIter::EmptyIter => None,
+            ContainerIter::SparseIter(ref mut iter) => iter.next().cloned(),
+            ContainerIter::DenseIter{
+                ref bitset,
+                ref mut byte_pos,
+                ref mut bit_pos,
+            } => {
+                if *byte_pos > bitset.len() {
+                    return None;
+                }
+                let mut next_val = None;
+                let mut found = false;
+                for by in *byte_pos..bitset.len() {
+                    let cur_byte = bitset[by];
+                    for b in *bit_pos..8 {
+                        if (cur_byte & (1<<b)) == 0 {
+                            continue;
+                        }
+                        next_val = Some(((*byte_pos << 3) as u16) | (*bit_pos as u16));
+                        *bit_pos = b + 1;
+                        found = true;
+                        break;
+                    }
+                    if found {
+                        // we found the next set bit. However, we need
+                        // to handle the edge case where the bit pos turns
+                        // to be 8. In this case, we need to advance to the
+                        // next byte for obvious reasons.
+                        debug_assert!(*bit_pos <= 8);
+                        if *bit_pos == 8 {
+                            *bit_pos = 0;
+                            *byte_pos += 1;
+                        }
+                        break;
+                    }
+                    *byte_pos = by;
+                }
+                return next_val;
+            },
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Container {
+    type Item = u16;
+    type IntoIter = ContainerIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ContainerIter::new(self)
+    }
+}
+
+impl Default for Container {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+type ChunkID = u16;
+type VectorIndex = usize;
+
 #[inline]
 fn chunk_index(item: u32) -> ChunkID {
-    ((item & 0xffff_0000) >> 4) as u16
+    ((item & 0xffff_0000) >> 16) as u16
 }
 
 #[inline]
 fn container_element(item: u32) -> u16 {
     (item & 0x0000_ffff) as u16
 }
-
-type ChunkID = u16;
-type VectorIndex = usize;
 
 /// `RoaringBitmap` is the implementation of the bitmap supporting
 /// efficient bitset operations. But note that it can only support
@@ -292,6 +371,64 @@ impl RoaringBitmap {
     }
 }
 
+impl<'a> IntoIterator for &'a RoaringBitmap {
+    type Item = u32;
+    type IntoIter = RoaringBitmapIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RoaringBitmapIter::new(self)
+    }
+}
+
+pub struct RoaringBitmapIter<'a> {
+    roaring_bitmap: &'a RoaringBitmap,
+    vec_chunk_idx: usize,
+    cur_chunk_iter: Option<ContainerIter<'a>>,
+}
+
+impl<'a> RoaringBitmapIter<'a> {
+    fn new(rb: &'a RoaringBitmap) -> Self {
+        RoaringBitmapIter {
+            roaring_bitmap: rb,
+            vec_chunk_idx: 0,
+            cur_chunk_iter: rb.chunks.first().map(|(_, c)| c.into_iter()),
+        }
+    }
+}
+
+impl<'a> Iterator for RoaringBitmapIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_item = match self.cur_chunk_iter {
+            None => None,
+            Some(ref mut container_iter) => {
+                container_iter.next()
+            },
+        };
+        if let Some(nxt) = next_item {
+            let cur_chunk_idx = self.roaring_bitmap.chunks[self.vec_chunk_idx].0;
+            let elem = (cur_chunk_idx as u32) << 16 | (nxt as u32);
+            return Some(elem);
+        }
+        // If it is none, then it might have been the end of the container.
+        // So we move on to the next chunk container and so on until we either
+        // reach the end or find the container.
+        let mut next_elem = None;
+        for nxt_vec_idx in (self.vec_chunk_idx+1..self.roaring_bitmap.chunks.len()) {
+            let (chunk_idx, container) = self.roaring_bitmap.chunks.get(nxt_vec_idx).unwrap();
+            let mut container_iter = container.into_iter();
+            if let Some(nxt_elem) = container_iter.next() {
+                next_elem = Some((*chunk_idx as u32) << 16 | (nxt_elem as u32));
+                self.vec_chunk_idx = nxt_vec_idx;
+                self.cur_chunk_iter = Some(container_iter);
+                break;
+            }
+        }
+        return next_elem;
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -310,6 +447,20 @@ mod test {
 
         bm.remove(10);
         assert!(!bm.contains(10));
+    }
+
+    #[test]
+    fn test_iterator() {
+        let mut bm = RoaringBitmap::new();
+        bm.add(0x0000_1100);
+        bm.add(0x0000_001f);
+        bm.add(0x0010_dead);
+
+        let mut iter = bm.into_iter();
+        assert_eq!(iter.next(), Some(0x0000_001f));
+        assert_eq!(iter.next(), Some(0x0000_1100));
+        assert_eq!(iter.next(), Some(0x0010_dead));
+        assert_eq!(iter.next(), None);
     }
 
     #[test]
