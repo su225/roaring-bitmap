@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-use std::mem;
+use std::{cmp, mem};
 use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
@@ -21,8 +21,9 @@ impl Container {
             Empty => 0,
             Sparse(s) => s.len(),
             Dense(d) => {
-                d.iter().map(|b| (0..7_usize).map(|bit_pos| (b >> bit_pos) & 1).sum::<u8>())
-                    .sum::<u8>() as usize
+                d.iter().map(|b|
+                    (0..7_usize).map(|bit_pos| ((b >> bit_pos) & 1) as usize).sum::<usize>())
+                    .sum::<usize>()
             },
         }
     }
@@ -157,10 +158,69 @@ impl Container {
     fn intersection(&self, right: &Container) -> Container {
         match (self, right) {
             (Empty, _) | (_, Empty) => Empty,
-            (Dense(ref x), Dense(ref y)) => todo!(),
-            (Sparse(ref x), Dense(ref y)) => todo!(),
-            (Dense(ref x), Sparse(ref y)) => todo!(),
-            (Sparse(ref x), Sparse(ref y)) => todo!(),
+            (Dense(ref x), Dense(ref y)) => {
+                let mut intersected = x.clone();
+                let mut intersect_length = 0;
+                for i in 0..y.len() {
+                    intersected[i] |= y[i];
+                    for j in 0..8 {
+                        if (intersected[i] & (1<<j)) > 0 {
+                            intersect_length += 1;
+                        }
+                    }
+                }
+                let res = Dense(intersected);
+                if intersect_length > MAX_SPARSE_CONTAINER_SIZE {
+                    res
+                } else {
+                    res.into_sparse()
+                }
+            },
+            (Sparse(ref x), Dense(ref y)) => {
+                let mut intersected: Vec<u16> = Vec::with_capacity(x.len());
+                for spos in x {
+                    let byte_pos = (spos >> 3) as usize;
+                    let bit_pos = spos & 0b111;
+                    if (y[byte_pos] & (1<<bit_pos)) > 0 {
+                        intersected.push(*spos);
+                    }
+                }
+                Sparse(intersected)
+            },
+            (Dense(ref x), Sparse(ref y)) => {
+                let mut intersected = Vec::with_capacity(y.len());
+                for spos in y {
+                    let byte_pos = (spos >> 3) as usize;
+                    let bit_pos = spos & 0b111;
+                    if (x[byte_pos] & (1<<bit_pos)) > 0 {
+                        intersected.push(*spos);
+                    }
+                }
+                Sparse(intersected)
+            },
+            (Sparse(ref x), Sparse(ref y)) => {
+                let mut bitpos = Vec::with_capacity(cmp::min(x.len(), y.len()));
+                let (mut idx1, mut idx2) = (0_usize, 0_usize);
+                while idx1 < x.len() && idx2 < y.len() {
+                    let mut candidate;
+                    if x[idx1] < y[idx2] {
+                        candidate = x[idx1];
+                        idx1 += 1;
+                    } else if x[idx1] > y[idx2] {
+                        candidate = y[idx2];
+                        idx2 += 1;
+                    } else {
+                        candidate = x[idx1];
+                        idx1 += 1;
+                        idx2 += 1;
+                    }
+                    let last_added = bitpos.last();
+                    if last_added.is_none() || candidate > *last_added.unwrap() {
+                        bitpos.push(candidate);
+                    }
+                }
+                Sparse(bitpos)
+            },
         }
     }
 
@@ -375,12 +435,25 @@ impl RoaringBitmap {
     /// More specifically, it constructs and returns another `RoaringBitmap`
     /// which contains elements from both the sets.
     pub fn intersection(&self, other: &RoaringBitmap) -> RoaringBitmap {
-        RoaringBitmap {
-            chunks: self.chunks.iter().zip(other.chunks.iter())
-                        .filter(|((c1, _), (c2, _))| c1 == c2)
-                        .map(|((c1, x), (_, y))| (*c1, x.intersection(y)))
-                        .collect::<Vec<(ChunkID, Container)>>(),
+        let mut chunks = vec![];
+        let (mut idx1, mut idx2) = (0_usize, 0_usize);
+        while idx1 < self.chunks.len() && idx2 < other.chunks.len() {
+            let (chunk_idx1, c1) = self.chunks.get(idx1).unwrap();
+            let (chunk_idx2, c2) = other.chunks.get(idx2).unwrap();
+            if chunk_idx1 == chunk_idx2 {
+                let intersection = c1.intersection(c2);
+                if intersection.len() > 0 {
+                    chunks.push((*chunk_idx1, intersection));
+                }
+                idx1 += 1;
+                idx2 += 1;
+            } else if chunk_idx1 < chunk_idx2 {
+                idx1 += 1;
+            } else if chunk_idx1 > chunk_idx2 {
+                idx2 += 1;
+            }
         }
+        RoaringBitmap { chunks }
     }
 
     /// `difference` computes the set difference between this and the `other`
@@ -690,7 +763,7 @@ mod test {
     }
 
     #[test]
-    fn test_set_intersection() {
+    fn test_set_intersection_both_sparse() {
         let mut a = RoaringBitmap::new();
         let mut b = RoaringBitmap::new();
 
@@ -702,6 +775,35 @@ mod test {
         assert_eq!(c.len(), 1);
         assert!(c.contains(10));
         assert!(!c.contains(20));
+    }
+
+    #[test]
+    fn test_set_intersection_both_dense() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        (0..(1<<16)).for_each(|x| a.add(x));
+        ((1<<16)..2*(1<<16)).for_each(|x| b.add(x));
+
+        let c = a.intersection(&b).into_iter().collect::<Vec<u32>>();
+        assert!(c.is_empty());
+
+        ((1<<16)..(1<<16)+10).for_each(|x| a.add(x));
+        let d = a.intersection(&b).into_iter().collect::<Vec<u32>>();
+        assert_eq!(d, ((1<<16)..(1<<16)+10).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn test_set_intersection_sparse_and_dense() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        (0..(1<<16)).for_each(|x| a.add(x));
+        b.add(0);
+        b.add(0x0000_ff11);
+
+        let c = a.intersection(&b).into_iter().collect::<Vec<u32>>();
+        assert_eq!(c, vec![0, 0x0000_ff11]);
     }
 
     #[test]
