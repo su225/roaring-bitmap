@@ -720,21 +720,6 @@ impl<'a> Iterator for RoaringBitmapIter<'a> {
 }
 
 #[cfg(test)]
-mod container_union_test {
-
-}
-
-#[cfg(test)]
-mod container_intersection_test {
-
-}
-
-#[cfg(test)]
-mod container_difference_test {
-
-}
-
-#[cfg(test)]
 mod roaring_bitset_test {
     use super::*;
     use pretty_assertions::{assert_eq};
@@ -937,5 +922,34 @@ mod roaring_bitset_test {
         let b_symdiff_a = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
         assert_eq!(a_symdiff_b, b_symdiff_a);
         assert_eq!(a_symdiff_b, a.union(&b).into_iter().collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn test_symmetric_difference_with_exactly_same_sets() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        a.add(10); b.add(10);
+        a.add(20); b.add(20);
+
+        let a_symdiff_b = a.symmetric_difference(&b).into_iter().collect::<Vec<u32>>();
+        let b_symdiff_a = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
+        assert_eq!(a_symdiff_b, b_symdiff_a);
+        assert!(a_symdiff_b.is_empty());
+    }
+
+    #[test]
+    fn test_symmetric_difference_with_one_being_subset_of_another() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        a.add(10); b.add(10);
+        a.add(20);
+        a.add(30);
+
+        let a_symdiff_b = a.symmetric_difference(&b).into_iter().collect::<Vec<u32>>();
+        let b_symdiff_a = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
+        assert_eq!(a_symdiff_b, b_symdiff_a);
+        assert_eq!(a_symdiff_b, vec![20, 30]);
     }
 }
