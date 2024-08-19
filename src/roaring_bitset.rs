@@ -122,7 +122,7 @@ impl Container {
                 let mut set_bit = |pos| {
                     let byte_pos = (pos >> 3) as usize;
                     let bit_pos = (pos & 0b111) as u8;
-                    bitset[byte_pos] |= (1 << bit_pos);
+                    bitset[byte_pos] |= 1 << bit_pos;
                 };
                 x.iter().for_each(&mut set_bit);
                 y.iter().for_each(&mut set_bit);
@@ -202,7 +202,7 @@ impl Container {
                 let mut bitpos = Vec::with_capacity(cmp::min(x.len(), y.len()));
                 let (mut idx1, mut idx2) = (0_usize, 0_usize);
                 while idx1 < x.len() && idx2 < y.len() {
-                    let mut candidate;
+                    let candidate;
                     if x[idx1] < y[idx2] {
                         candidate = x[idx1];
                         idx1 += 1;
@@ -256,13 +256,16 @@ impl Container {
                 // 1. If we ran out of elements in x, then we don't do anything
                 // 2. If we have run out of elements in y, then we add the rest
                 //    because we know for sure that they don't belong there.
+                if idx1 < x.len() {
+                    x[idx1..].iter().for_each(|xpos| bitpos.push(*xpos));
+                }
                 Sparse(bitpos)
             },
             (Sparse(ref x), Dense(ref y)) => {
                 Sparse((*x).iter()
                     .filter(|&p| {
                         let byte_pos = (p >> 3) as usize;
-                        let bit_pos = (p & 0b111);
+                        let bit_pos = p & 0b111;
                         (y[byte_pos] & (1 << bit_pos)) == 0
                     })
                     .map(|x| *x)
@@ -272,7 +275,7 @@ impl Container {
                 let mut diff_bitset = x.clone();
                 for yp in y {
                     let byte_pos = (yp >> 3) as usize;
-                    let bit_pos = (yp & 0b111);
+                    let bit_pos = yp & 0b111;
                     let bit_mask = !(1 << bit_pos) as u8;
                     diff_bitset[byte_pos] &= bit_mask;
                 }
@@ -385,7 +388,6 @@ impl Default for Container {
 }
 
 type ChunkID = u16;
-type VectorIndex = usize;
 
 #[inline]
 fn chunk_index(item: u32) -> ChunkID {
@@ -528,7 +530,7 @@ impl RoaringBitmap {
         let mut diff_chunks: Vec<(ChunkID, Container)> = vec![];
         while idx1 < self.chunks.len() && idx2 < other.chunks.len() {
             let (chunk_idx1, c1) = self.chunks.get(idx1).unwrap();
-            let (chunk_idx2, c2) = self.chunks.get(idx2).unwrap();
+            let (chunk_idx2, c2) = other.chunks.get(idx2).unwrap();
             if chunk_idx2 < chunk_idx1 {
                 idx2 += 1;
                 continue;
@@ -572,7 +574,7 @@ impl RoaringBitmap {
         // borrow is dropped as soon as we are done inserting
         // the element into the container.
         {
-            let mut chunk_container = self.chunks.get_mut(vec_idx);
+            let chunk_container = self.chunks.get_mut(vec_idx);
             if chunk_container.is_none() {
                 return;
             }
@@ -605,7 +607,6 @@ impl RoaringBitmap {
     }
 
     fn remove_item_from_chunk_container(&mut self, item: u32, vec_idx: usize) {
-        let chunk_idx = chunk_index(item);
         let elem = container_element(item);
         let mut needs_sparse_conversion = false;
         let mut can_free_slot = false;
@@ -642,16 +643,6 @@ impl RoaringBitmap {
             debug_assert!(!prev_container.is_sparse());
             self.chunks[vec_idx] = (prev_chunk_id, prev_container.into_sparse());
         }
-    }
-
-    fn do_insert_into_bitset(&mut self, elem: u16, dense_bitset: &mut [u8; CHUNK_BITSET_CONTAINER_SIZE]) {
-        // it is simpler in case of dense bitset because the cardinality
-        // can only go up and hence we don't need to re-allocate anything
-        let byte_pos = (elem >> 3) as usize;
-        let bit_pos = elem & 0b111;
-        debug_assert!(byte_pos < dense_bitset.len());
-        debug_assert!(bit_pos < 8 && bit_pos >= 0);
-        dense_bitset[byte_pos] |= 1 << bit_pos;
     }
 
     fn get_chunk(&self, chunk_idx: u16) -> Option<usize> {
@@ -703,7 +694,7 @@ impl<'a> Iterator for RoaringBitmapIter<'a> {
         // So we move on to the next chunk container and so on until we either
         // reach the end or find the container.
         let mut next_elem = None;
-        for nxt_vec_idx in (self.vec_chunk_idx+1..self.roaring_bitmap.chunks.len()) {
+        for nxt_vec_idx in self.vec_chunk_idx+1..self.roaring_bitmap.chunks.len() {
             let (chunk_idx, container) = self.roaring_bitmap.chunks.get(nxt_vec_idx).unwrap();
             let mut container_iter = container.into_iter();
             if let Some(nxt_elem) = container_iter.next() {
@@ -819,7 +810,7 @@ mod test {
         (0..(1<<16)).for_each(|x| a.add(x as u32));
 
         let c = a.union(&b);
-        let mut c_unioned = ((0..(1<<16)).collect::<Vec<u32>>());
+        let mut c_unioned = (0..(1<<16)).collect::<Vec<u32>>();
         c_unioned.push(0xffff_1111);
 
         let actual_c_unioned = c.into_iter().collect::<Vec<u32>>();
