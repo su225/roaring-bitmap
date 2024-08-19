@@ -8,3 +8,5 @@ authors = ["Suchith J N"]
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
+quickcheck = "1"
+quickcheck_macros = "1"
