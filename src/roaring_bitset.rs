@@ -202,21 +202,23 @@ impl Container {
                 let mut bitpos = Vec::with_capacity(cmp::min(x.len(), y.len()));
                 let (mut idx1, mut idx2) = (0_usize, 0_usize);
                 while idx1 < x.len() && idx2 < y.len() {
-                    let candidate;
+                    let mut candidate = None;
                     if x[idx1] < y[idx2] {
-                        candidate = x[idx1];
                         idx1 += 1;
                     } else if x[idx1] > y[idx2] {
-                        candidate = y[idx2];
                         idx2 += 1;
                     } else {
-                        candidate = x[idx1];
+                        candidate = Some(x[idx1]);
                         idx1 += 1;
                         idx2 += 1;
                     }
+                    if candidate.is_none() {
+                        continue;
+                    }
+                    let potential_addition = candidate.unwrap();
                     let last_added = bitpos.last();
-                    if last_added.is_none() || candidate > *last_added.unwrap() {
-                        bitpos.push(candidate);
+                    if last_added.is_none() || potential_addition > *last_added.unwrap() {
+                        bitpos.push(potential_addition);
                     }
                 }
                 Sparse(bitpos)
@@ -556,6 +558,15 @@ impl RoaringBitmap {
         RoaringBitmap { chunks: diff_chunks }
     }
 
+    /// `symmetric_difference` computes the set difference symmetric difference
+    /// between the two given roaring bitsets. Currently, it is computed as the
+    /// difference between the union and the intersection of two sets.
+    pub fn symmetric_difference(&self, other: &RoaringBitmap) -> RoaringBitmap {
+        let set_union = self.union(&other);
+        let set_intersection = self.intersection(&other);
+        return set_union.difference(&set_intersection);
+    }
+
     fn maybe_allocate_chunk(&mut self, chunk_index: ChunkID) -> usize {
         self.chunks
             .binary_search_by(|chk| chk.0.cmp(&chunk_index))
@@ -864,7 +875,7 @@ mod test {
     }
 
     #[test]
-    fn test_set_difference() {
+    fn test_set_difference_both_sparse() {
         let mut a = RoaringBitmap::new();
         let mut b = RoaringBitmap::new();
 
@@ -879,5 +890,21 @@ mod test {
         assert_eq!(b_diff_a.len(), 1);
         assert!(b_diff_a.contains(20));
         assert!(!b_diff_a.contains(10));
+    }
+
+    #[test]
+    fn test_symmetric_difference_both_sparse() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        a.add(10);
+        a.add(20);
+        b.add(20);
+        b.add(30);
+
+        let a_symdiff_b = a.symmetric_difference(&b).into_iter().collect::<Vec<u32>>();
+        let b_symdiff_b = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
+        assert_eq!(a_symdiff_b, b_symdiff_b);
+        assert_eq!(a_symdiff_b, vec![10, 30]);
     }
 }
