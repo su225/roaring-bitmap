@@ -720,7 +720,22 @@ impl<'a> Iterator for RoaringBitmapIter<'a> {
 }
 
 #[cfg(test)]
-mod test {
+mod container_union_test {
+
+}
+
+#[cfg(test)]
+mod container_intersection_test {
+
+}
+
+#[cfg(test)]
+mod container_difference_test {
+
+}
+
+#[cfg(test)]
+mod roaring_bitset_test {
     use super::*;
     use pretty_assertions::{assert_eq};
 
@@ -906,5 +921,21 @@ mod test {
         let b_symdiff_b = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
         assert_eq!(a_symdiff_b, b_symdiff_b);
         assert_eq!(a_symdiff_b, vec![10, 30]);
+    }
+
+    #[test]
+    fn test_symmetric_difference_with_disjoint_sets() {
+        let mut a = RoaringBitmap::new();
+        let mut b = RoaringBitmap::new();
+
+        a.add(10);
+        a.add(20);
+        b.add(30);
+        b.add(40);
+
+        let a_symdiff_b = a.symmetric_difference(&b).into_iter().collect::<Vec<u32>>();
+        let b_symdiff_a = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
+        assert_eq!(a_symdiff_b, b_symdiff_a);
+        assert_eq!(a_symdiff_b, a.union(&b).into_iter().collect::<Vec<u32>>());
     }
 }
