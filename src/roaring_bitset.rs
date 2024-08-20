@@ -674,6 +674,9 @@ impl<'a> IntoIterator for &'a RoaringBitmap {
     }
 }
 
+/// `RoaringBitmapIter` creates an iterator over the underlying
+/// `RoaringBitmap` structure. This allows iterating over the
+/// elements of the bitmap in order.
 pub struct RoaringBitmapIter<'a> {
     roaring_bitmap: &'a RoaringBitmap,
     vec_chunk_idx: usize,
@@ -1056,5 +1059,29 @@ mod roaring_bitset_property_tests {
         let union = set.union(&subset);
         let union_elems: HashSet<u32> = union.into_iter().collect();
         union_elems == x.set
+    }
+
+    #[quickcheck]
+    fn intersection_of_set_must_have_elements_in_both_sets(a: HashSet<u32>, b: HashSet<u32>) -> bool {
+        let mut set_a = RoaringBitmap::new();
+        let mut set_b = RoaringBitmap::new();
+        a.iter().for_each(|&x| set_a.add(x));
+        b.iter().for_each(|&y| set_b.add(y));
+
+        let a_intersection_b: Vec<u32> = set_a.intersection(&set_b).into_iter().collect();
+        a_intersection_b.iter().all(|&elem| set_a.contains(elem) && set_b.contains(elem))
+    }
+
+    #[quickcheck]
+    fn intersection_of_set_must_have_an_element_when_it_is_present_in_both_sets(a: HashSet<u32>, b: HashSet<u32>) -> bool {
+        let mut set_a = RoaringBitmap::new();
+        let mut set_b = RoaringBitmap::new();
+        a.iter().for_each(|&x| set_a.add(x));
+        b.iter().for_each(|&y| set_b.add(y));
+
+        let a_intersection_b: Vec<u32> = set_a.intersection(&set_b).into_iter().collect();
+
+        a.iter().all(|&x| !set_b.contains(x) || a_intersection_b.contains(&x)) &&
+            b.iter().all(|&x| !set_a.contains(x) || a_intersection_b.contains(&x))
     }
 }
