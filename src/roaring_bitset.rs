@@ -11,8 +11,18 @@ const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
 /// elements in a chunk have their upper 16-bits in common.
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum Container {
+    /// `Empty` is a sentinel value used for replacing.
+    /// Don't represent an empty chunk. Just remove it
+    /// from the chunk vector instead.
     Empty,
+    /// `Sparse` represents the sparse bitset representation
+    /// of a chunk. This is when the number of set bits is less
+    /// than 4096. So 4096*2B = 8192B which and a bitset of the
+    /// same size can represent 8192*8 = 2^(13+3) = 2^16 which
+    /// is the maximum allowed chunk size. After 4096, it is
+    /// cheaper to represent by a bitset.
     Sparse(Vec<u16>),
+    /// `Dense` is the well-known bitset representation
     Dense(Box<[u8; CHUNK_BITSET_CONTAINER_SIZE]>),
 }
 
