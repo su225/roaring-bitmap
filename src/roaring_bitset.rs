@@ -1018,6 +1018,18 @@ mod roaring_bitset_property_tests {
     }
 
     #[quickcheck]
+    fn non_empty_bitmap_will_have_at_least_one_chunk(a: RoaringBitmap) -> bool {
+        a.len() == 0 || (a.len() > 0 && a.chunks.len() > 0)
+    }
+
+    #[quickcheck]
+    fn removing_all_elements_should_eventually_lead_to_empty_vector_chunk(mut a: RoaringBitmap) -> bool {
+        let elems_to_remove: Vec<u32> = a.into_iter().collect();
+        elems_to_remove.iter().for_each(|x| a.remove(*x));
+        a.chunks.is_empty()
+    }
+
+    #[quickcheck]
     fn union_must_have_elements_from_both_sets(a: RoaringBitmap, b: RoaringBitmap) -> bool {
         let a_union_b = a.union(&b);
         let elems_in_a_not_in_union = a.into_iter().all(|x| a_union_b.contains(x));
