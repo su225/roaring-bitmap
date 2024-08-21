@@ -980,14 +980,14 @@ mod roaring_bitset_test {
 
 #[cfg(test)]
 mod roaring_bitset_property_tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::fmt::Debug;
     use std::hash::Hash;
 
     use quickcheck::{Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
 
-    use crate::roaring_bitset::RoaringBitmap;
+    use crate::roaring_bitset::{chunk_index, ChunkID, container_element, MAX_SPARSE_CONTAINER_SIZE, RoaringBitmap};
 
     #[derive(Debug, Clone)]
     struct SetAndSubset<T: Arbitrary + Clone + Debug + Eq + Hash> {
@@ -1018,8 +1018,51 @@ mod roaring_bitset_property_tests {
     }
 
     #[quickcheck]
-    fn non_empty_bitmap_will_have_at_least_one_chunk(a: RoaringBitmap) -> bool {
+    fn bitmap_structure_non_empty_bitmap_will_have_at_least_one_chunk(a: RoaringBitmap) -> bool {
         a.len() == 0 || (a.len() > 0 && a.chunks.len() > 0)
+    }
+
+    #[quickcheck]
+    fn bitmap_structure_elements_are_mapped_to_correct_chunks(a: HashSet<u32>) -> bool {
+        let mut set = RoaringBitmap::new();
+        a.iter().for_each(|x| set.add(*x));
+
+        let actual_chunk_indexes: HashSet<u16> = set.chunks.iter().map(|(chunk_id, _)| *chunk_id).collect();
+        let expected_chunk_indexes: HashSet<u16> = a.iter().map(|x| chunk_index(*x)).collect();
+        expected_chunk_indexes == actual_chunk_indexes
+    }
+
+    #[quickcheck]
+    fn bitmap_structure_chunks_are_stored_in_sorted_order_and_chunk_indexes_are_unique(a: RoaringBitmap) -> bool {
+        a.chunks.iter().map(|(chunk_idx, _)| *chunk_idx).collect::<Vec<u16>>()
+            .windows(2).all(|w| w[0] < w[1])
+    }
+
+    #[quickcheck]
+    fn bitmap_structure_elements_are_mapped_to_correct_chunks_and_chunk_type(a: HashSet<u32>) -> bool {
+        let mut set = RoaringBitmap::new();
+        a.iter().for_each(|x| set.add(*x));
+
+        let mut expected_mapping: HashMap<ChunkID, BTreeSet<u16>> = HashMap::new();
+        for &elem in a.iter() {
+            let chunk_idx = chunk_index(elem);
+            let chunk_elem = container_element(elem);
+            expected_mapping.entry(chunk_idx)
+                .and_modify(|t| { t.insert(chunk_elem); })
+                .or_insert_with(|| BTreeSet::from_iter(vec![chunk_elem]));
+        }
+        for (chunk_index, ctr) in set.chunks.iter() {
+            let actual_container_elems: BTreeSet<u16> = ctr.into_iter().collect();
+            let expected_container_elems: BTreeSet<u16> = expected_mapping.get(chunk_index).cloned().unwrap_or(BTreeSet::new());
+            if actual_container_elems != expected_container_elems {
+                return false;
+            }
+            if (ctr.len() <= MAX_SPARSE_CONTAINER_SIZE && !ctr.is_sparse()) ||
+                (ctr.len() > MAX_SPARSE_CONTAINER_SIZE && ctr.is_sparse()) {
+                return false;
+            }
+        }
+        true
     }
 
     #[quickcheck]
