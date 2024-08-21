@@ -549,7 +549,10 @@ impl RoaringBitmap {
                 diff_chunks.push((*chunk_idx1, c1.clone()));
                 idx1 += 1;
             } else if chunk_idx1 == chunk_idx2 {
-                diff_chunks.push((*chunk_idx1, c1.difference(c2)));
+                let chunk_diff = c1.difference(c2);
+                if chunk_diff.len() > 0 {
+                    diff_chunks.push((*chunk_idx1, chunk_diff));
+                }
                 idx1 += 1;
                 idx2 += 1;
             } else {
@@ -1092,5 +1095,45 @@ mod roaring_bitset_property_tests {
         x.subset.iter().for_each(|&s| subset.add(s));
 
         set.intersection(&subset) == subset
+    }
+
+    #[quickcheck]
+    fn difference_must_have_elements_from_a_not_in_b(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_diff_b = a.difference(&b);
+        a_diff_b.into_iter().all(|x| a.contains(x) && !b.contains(x))
+    }
+
+    #[quickcheck]
+    fn difference_with_itself_is_empty_set(a: RoaringBitmap) -> bool {
+        let empty_set = RoaringBitmap::new();
+        a.difference(&a) == empty_set
+    }
+
+    #[quickcheck]
+    fn difference_with_empty_set_is_itself(a: RoaringBitmap) -> bool {
+        let empty_set = RoaringBitmap::new();
+        a.difference(&empty_set) == a
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_must_have_elements_not_in_the_intersection(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_symdiff_b = a.symmetric_difference(&b);
+        let a_intersection_b = a.intersection(&b);
+        a_symdiff_b.into_iter().all(|x| !a_intersection_b.contains(x))
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_is_commutative(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_symdiff_b = a.symmetric_difference(&b);
+        let b_symdiff_a = b.symmetric_difference(&a);
+        a_symdiff_b == b_symdiff_a
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_is_difference_of_union_and_intersection(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_symdiff_b = a.symmetric_difference(&b);
+        let a_union_b = a.union(&b);
+        let a_intersection_b = a.intersection(&b);
+        a_symdiff_b == a_union_b.difference(&a_intersection_b)
     }
 }
