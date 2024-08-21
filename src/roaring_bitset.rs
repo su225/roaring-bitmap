@@ -1057,8 +1057,9 @@ mod roaring_bitset_property_tests {
             if actual_container_elems != expected_container_elems {
                 return false;
             }
-            if (ctr.len() <= MAX_SPARSE_CONTAINER_SIZE && !ctr.is_sparse()) ||
-                (ctr.len() > MAX_SPARSE_CONTAINER_SIZE && ctr.is_sparse()) {
+            if ctr.len() == 0 ||
+                (ctr.len() <= MAX_SPARSE_CONTAINER_SIZE && !ctr.is_sparse()) ||
+                (ctr.len() > MAX_SPARSE_CONTAINER_SIZE && ctr.is_sparse()){
                 return false;
             }
         }
