@@ -9,7 +9,7 @@ const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
 
 /// `Container` holds the elements of the bitset in a chunk. All
 /// elements in a chunk have their upper 16-bits in common.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum Container {
     Empty,
     Sparse(Vec<u16>),
@@ -420,7 +420,7 @@ fn container_element(item: u32) -> u16 {
 /// 1. As sorted set when the cardinality is <= 4096.
 /// 2. As a full bitset when the cardinality is > 4096.
 /// 3. Paper #2 introduces run-length encoding representation.
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RoaringBitmap {
     chunks: Vec<(ChunkID, Container)>,
 }
@@ -970,6 +970,7 @@ mod roaring_bitset_property_tests {
     use std::collections::HashSet;
     use std::fmt::Debug;
     use std::hash::Hash;
+
     use quickcheck::{Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
 
@@ -994,59 +995,46 @@ mod roaring_bitset_property_tests {
         }
     }
 
-    #[quickcheck]
-    fn union_must_have_elements_from_both_sets(a: HashSet<u32>, b: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        let mut set_b = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        b.iter().for_each(|&y| set_b.add(y));
-        let a_union_b = set_a.union(&set_b);
-
-        let elems_in_a_not_in_union = a.iter().filter(|x| !a_union_b.contains(**x)).collect::<Vec<&u32>>();
-        let elems_in_b_not_in_union = b.iter().filter(|x| !a_union_b.contains(**x)).collect::<Vec<&u32>>();
-        return elems_in_a_not_in_union.is_empty() && elems_in_b_not_in_union.is_empty();
+    impl Arbitrary for RoaringBitmap {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let set: HashSet<u32> = Arbitrary::arbitrary(g);
+            let mut bitmap = RoaringBitmap::new();
+            set.into_iter().for_each(|x| bitmap.add(x));
+            bitmap
+        }
     }
 
     #[quickcheck]
-    fn union_must_not_have_elements_other_than_from_its_constituents(a: HashSet<u32>, b: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        let mut set_b = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        b.iter().for_each(|&y| set_b.add(y));
-        let a_union_b = set_a.union(&set_b);
+    fn union_must_have_elements_from_both_sets(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_union_b = a.union(&b);
+        let elems_in_a_not_in_union = a.into_iter().all(|x| a_union_b.contains(x));
+        let elems_in_b_not_in_union = b.into_iter().all(|x| a_union_b.contains(x));
+        elems_in_a_not_in_union && elems_in_b_not_in_union
+    }
 
+    #[quickcheck]
+    fn union_must_not_have_elements_other_than_from_its_constituents(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_union_b = a.union(&b);
         let union_elems = a_union_b.into_iter().collect::<Vec<u32>>();
-        union_elems.into_iter().all(|e| set_a.contains(e) || set_b.contains(e))
+        union_elems.into_iter().all(|e| a.contains(e) || b.contains(e))
     }
 
     #[quickcheck]
-    fn union_must_be_commutative(a: HashSet<u32>, b: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        let mut set_b = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        b.iter().for_each(|&y| set_b.add(y));
-
-        let a_union_b = set_a.union(&set_b).into_iter().collect::<HashSet<u32>>();
-        let b_union_a = set_b.union(&set_a).into_iter().collect::<HashSet<u32>>();
+    fn union_must_be_commutative(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_union_b = a.union(&b);
+        let b_union_a = b.union(&a);
         a_union_b == b_union_a
     }
 
     #[quickcheck]
-    fn union_with_itself_is_the_same_set(a: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-
-        let a_union_a = set_a.union(&set_a).into_iter().collect::<HashSet<u32>>();
-        a_union_a == a
+    fn union_with_itself_is_the_same_set(a: RoaringBitmap) -> bool {
+        a.union(&a) == a
     }
 
     #[quickcheck]
-    fn union_with_an_empty_set_is_the_same_set(a: HashSet<u32>) -> bool {
+    fn union_with_an_empty_set_is_the_same_set(a: RoaringBitmap) -> bool {
         let empty_set = RoaringBitmap::new();
-        let mut set_a = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        let a_union_empty = set_a.union(&empty_set).into_iter().collect::<HashSet<u32>>();
-        a_union_empty == a
+        a.union(&empty_set) == a
     }
 
     #[quickcheck]
@@ -1056,32 +1044,53 @@ mod roaring_bitset_property_tests {
         x.set.iter().for_each(|&s| set.add(s));
         x.subset.iter().for_each(|&s| subset.add(s));
 
-        let union = set.union(&subset);
-        let union_elems: HashSet<u32> = union.into_iter().collect();
-        union_elems == x.set
+        set.union(&subset) == set
     }
 
     #[quickcheck]
-    fn intersection_of_set_must_have_elements_in_both_sets(a: HashSet<u32>, b: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        let mut set_b = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        b.iter().for_each(|&y| set_b.add(y));
-
-        let a_intersection_b: Vec<u32> = set_a.intersection(&set_b).into_iter().collect();
-        a_intersection_b.iter().all(|&elem| set_a.contains(elem) && set_b.contains(elem))
+    fn intersection_of_set_must_have_elements_in_both_sets(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        a.intersection(&b).into_iter().all(|x| a.contains(x) && b.contains(x))
     }
 
     #[quickcheck]
-    fn intersection_of_set_must_have_an_element_when_it_is_present_in_both_sets(a: HashSet<u32>, b: HashSet<u32>) -> bool {
-        let mut set_a = RoaringBitmap::new();
-        let mut set_b = RoaringBitmap::new();
-        a.iter().for_each(|&x| set_a.add(x));
-        b.iter().for_each(|&y| set_b.add(y));
+    fn intersection_of_set_must_have_an_element_when_it_is_present_in_both_sets(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_intersection_b = a.intersection(&b);
+        a.into_iter().all(|x| !b.contains(x) || a_intersection_b.contains(x)) &&
+            b.into_iter().all(|x| !a.contains(x) || a_intersection_b.contains(x))
+    }
 
-        let a_intersection_b: Vec<u32> = set_a.intersection(&set_b).into_iter().collect();
+    #[quickcheck]
+    fn intersection_of_set_with_itself_is_the_same_set(a: RoaringBitmap) -> bool {
+        a.intersection(&a) == a
+    }
 
-        a.iter().all(|&x| !set_b.contains(x) || a_intersection_b.contains(&x)) &&
-            b.iter().all(|&x| !set_a.contains(x) || a_intersection_b.contains(&x))
+    #[quickcheck]
+    fn intersection_of_set_with_empty_set_is_empty_set(a: RoaringBitmap) -> bool {
+        let empty_set = RoaringBitmap::new();
+        a.intersection(&empty_set) == empty_set
+    }
+
+    #[quickcheck]
+    fn intersection_of_sets_is_commutative(a: RoaringBitmap, b: RoaringBitmap) -> bool {
+        let a_intersection_b = a.intersection(&b);
+        let b_intersection_a = b.intersection(&a);
+        a_intersection_b == b_intersection_a
+    }
+
+    #[quickcheck]
+    fn intersection_of_sets_is_associative(a: RoaringBitmap, b: RoaringBitmap, c: RoaringBitmap) -> bool {
+        let ab_c = a.intersection(&b).intersection(&c);
+        let a_bc = a.intersection(&b.intersection(&c));
+        ab_c == a_bc
+    }
+
+    #[quickcheck]
+    fn intersection_with_a_subset_is_the_subset(x: SetAndSubset<u32>) -> bool {
+        let mut set = RoaringBitmap::new();
+        let mut subset = RoaringBitmap::new();
+        x.set.iter().for_each(|&s| set.add(s));
+        x.subset.iter().for_each(|&s| subset.add(s));
+
+        set.intersection(&subset) == subset
     }
 }
