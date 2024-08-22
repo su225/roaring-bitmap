@@ -7,6 +7,33 @@ use Container::{Dense, Empty, Sparse};
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
 const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
 
+/// `BitmapPosition` is an internal type which converts
+/// the given u16 given to the container into (byte, bit)
+/// position so that it can be applied to the dense bitmap
+/// directly. This is to avoid computing the same thing
+/// again and again
+struct BitmapPosition {
+    byte_pos: usize,
+    bit_pos: u8,
+}
+
+impl From<u16> for BitmapPosition {
+    #[inline]
+    fn from(value: u16) -> Self {
+        BitmapPosition {
+            byte_pos: (value >> 3) as usize,
+            bit_pos: (value & 0b111) as u8,
+        }
+    }
+}
+
+impl Into<u16> for BitmapPosition {
+    #[inline]
+    fn into(self) -> u16 {
+        ((self.byte_pos << 3) | self.bit_pos as usize) as u16
+    }
+}
+
 /// `Container` holds the elements of the bitset in a chunk. All
 /// elements in a chunk have their upper 16-bits in common.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -32,9 +59,7 @@ impl Container {
             Empty => 0,
             Sparse(s) => s.len(),
             Dense(d) => {
-                d.iter().map(|b|
-                (0..7_usize).map(|bit_pos| ((b >> bit_pos) & 1) as usize).sum::<usize>())
-                    .sum::<usize>()
+                d.iter().map(|b| b.count_ones() as usize).sum()
             }
         }
     }
