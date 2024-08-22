@@ -1096,6 +1096,13 @@ mod roaring_bitset_property_tests {
     }
 
     #[quickcheck]
+    fn union_must_be_associative(a: RoaringBitmap, b: RoaringBitmap, c: RoaringBitmap) -> bool {
+        let u1 = a.union(&b.union(&c));
+        let u2 = (a.union(&b)).union(&c);
+        u1 == u2
+    }
+
+    #[quickcheck]
     fn union_with_itself_is_the_same_set(a: RoaringBitmap) -> bool {
         a.union(&a) == a
     }
