@@ -987,7 +987,7 @@ mod roaring_bitset_property_tests {
     use quickcheck::{Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
 
-    use crate::roaring_bitset::{chunk_index, ChunkID, container_element, MAX_SPARSE_CONTAINER_SIZE, RoaringBitmap};
+    use crate::roaring_bitset::{chunk_index, ChunkID, Container, container_element, MAX_SPARSE_CONTAINER_SIZE, RoaringBitmap};
 
     #[derive(Debug, Clone)]
     struct SetAndSubset<T: Arbitrary + Clone + Debug + Eq + Hash> {
@@ -1036,6 +1036,14 @@ mod roaring_bitset_property_tests {
     fn bitmap_structure_chunks_are_stored_in_sorted_order_and_chunk_indexes_are_unique(a: RoaringBitmap) -> bool {
         a.chunks.iter().map(|(chunk_idx, _)| *chunk_idx).collect::<Vec<u16>>()
             .windows(2).all(|w| w[0] < w[1])
+    }
+
+    #[quickcheck]
+    fn bitmap_structure_no_chunk_type_is_ever_empty(a: RoaringBitmap) -> bool {
+        a.chunks.iter().all(|(_, chunk_cnt)| match chunk_cnt {
+            Container::Empty => false,
+            _ => true,
+        })
     }
 
     #[quickcheck]
