@@ -12,6 +12,7 @@ const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
 /// position so that it can be applied to the dense bitmap
 /// directly. This is to avoid computing the same thing
 /// again and again
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct BitmapPosition {
     byte_pos: usize,
     bit_pos: u8,
@@ -34,6 +35,88 @@ impl Into<u16> for BitmapPosition {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DenseBitset {
+    b: [u8; CHUNK_BITSET_CONTAINER_SIZE],
+}
+
+impl DenseBitset {
+    fn new() -> Self {
+        DenseBitset { b: [0_u8; CHUNK_BITSET_CONTAINER_SIZE] }
+    }
+
+    fn set(&mut self, bit_pos: u16) {
+        let bitmap_pos = BitmapPosition::from(bit_pos);
+        self.b[bitmap_pos.byte_pos] |= 1<<bitmap_pos.bit_pos;
+    }
+
+    fn clear(&mut self, bit_pos: u16) {
+        let bitmap_pos = BitmapPosition::from(bit_pos);
+        self.b[bitmap_pos.byte_pos] &= !(1<<bitmap_pos.bit_pos);
+    }
+
+    fn is_set(&self, bit_pos: u16) -> bool {
+        let bitmap_pos = BitmapPosition::from(bit_pos);
+        (self.b[bitmap_pos.byte_pos] & (1<<bitmap_pos.bit_pos)) > 0
+    }
+
+    fn count_ones(&self) -> usize {
+        self.b.iter().map(|x| x.count_ones() as usize).sum()
+    }
+
+    fn union(&self, other: &DenseBitset) -> DenseBitset {
+        let res = DenseBitset::new();
+        for i in 0..res.b.len() {
+            res[i] = self.b[i] | other.b[i];
+        }
+        res
+    }
+
+    fn intersection(&self, other: &DenseBitset) -> DenseBitset {
+        let res = DenseBitset::new();
+        for i in 0..res.b.len() {
+            res[i] = self.b[i] & other.b[i];
+        }
+        res
+    }
+
+    fn difference(&self, other: &DenseBitset) -> DenseBitset {
+        let res = DenseBitset::new();
+        for i in 0..res.b.len() {
+            res[i] = self.b[i] & !other.b[i];
+        }
+        res
+    }
+
+    fn symmetric_difference(&self, other: &DenseBitset) -> DenseBitset {
+        let res = DenseBitset::new();
+        for i in 0..res.b.len() {
+            res[i] = self.b[i] ^ other.b[i];
+        }
+        res
+    }
+}
+
+impl From<Vec<u16>> for DenseBitset {
+    fn from(sparse_bit_pos: Vec<u16>) -> Self {
+        let mut db = DenseBitset::new();
+        sparse_bit_pos.into_iter().for_each(|pos| db.set(pos));
+        db
+    }
+}
+
+impl Into<Vec<u16>> for DenseBitset {
+    fn into(self) -> Vec<u16> {
+        let mut pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
+        for bitpos in 0..(self.b.len()<<3) as u16 {
+            if self.is_set(bitpos) {
+                pos.push(bitpos);
+            }
+        }
+        pos
+    }
+}
+
 /// `Container` holds the elements of the bitset in a chunk. All
 /// elements in a chunk have their upper 16-bits in common.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -50,7 +133,7 @@ enum Container {
     /// cheaper to represent by a bitset.
     Sparse(Vec<u16>),
     /// `Dense` is the well-known bitset representation
-    Dense(Box<[u8; CHUNK_BITSET_CONTAINER_SIZE]>),
+    Dense(Box<DenseBitset>),
 }
 
 impl Container {
@@ -58,9 +141,7 @@ impl Container {
         match self {
             Empty => 0,
             Sparse(s) => s.len(),
-            Dense(d) => {
-                d.iter().map(|b| b.count_ones() as usize).sum()
-            }
+            Dense(d) => d.iter().map(|b| b.count_ones() as usize).sum()
         }
     }
 
@@ -69,47 +150,23 @@ impl Container {
         match self {
             Empty => false,
             Sparse(s) => s.binary_search_by(|x| x.cmp(&e)).is_ok(),
-            Dense(d) => {
-                let byte_pos = (e >> 3) as usize;
-                let bit_pos = (e & 0b111) as usize;
-                d[byte_pos] >> bit_pos > 0
-            }
+            Dense(d) => d.is_set(e),
         }
     }
 
     fn into_sparse(self) -> Self {
         match self {
             Empty => Sparse(vec![]),
-            Dense(bitset) => {
-                let mut bit_pos_vec = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
-                for byte_index in 0..bitset.len() {
-                    for bit_pos in 0..8 {
-                        if (bitset[byte_index] & (1 << bit_pos)) > 0 {
-                            let byte_pos = (byte_index << 3) | bit_pos;
-                            debug_assert!((byte_pos as u16) < u16::MAX);
-                            bit_pos_vec.push(byte_pos as u16);
-                        }
-                    }
-                }
-                Sparse(bit_pos_vec)
-            }
+            Dense(bitset) => Sparse(bitset.into()),
             v => v,
         }
     }
 
     fn into_dense(self) -> Self {
         match self {
-            Empty => Dense(Box::new([0_u8; CHUNK_BITSET_CONTAINER_SIZE])),
-            Sparse(v) => {
-                let mut bitset = Box::new([0_u8; CHUNK_BITSET_CONTAINER_SIZE]);
-                for bit_pos in v.into_iter() {
-                    let byte_pos = ((bit_pos) >> 3) as usize;
-                    let bit_pos = (bit_pos) & 0b111;
-                    bitset[byte_pos] |= 1 << bit_pos;
-                }
-                Dense(bitset)
-            }
-            v => v,
+            Empty => Dense(Box::new(DenseBitset::new())),
+            Sparse(v) => Dense(Box::new(DenseBitset::from(v))),
+            dense => dense,
         }
     }
 
@@ -1000,6 +1057,79 @@ mod roaring_bitset_test {
         let b_symdiff_a = b.symmetric_difference(&a).into_iter().collect::<Vec<u32>>();
         assert_eq!(a_symdiff_b, b_symdiff_a);
         assert_eq!(a_symdiff_b, vec![20, 30]);
+    }
+}
+
+#[cfg(test)]
+mod dense_bitset_tests {
+    use quickcheck::{Arbitrary, Gen};
+    use quickcheck_macros::quickcheck;
+    use crate::roaring_bitset::{BitmapPosition, CHUNK_BITSET_CONTAINER_SIZE, DenseBitset};
+
+    #[test]
+    fn test_union_of_two_bitsets() {
+        let a = DenseBitset::new();
+        let b = DenseBitset::new();
+    }
+
+    impl Arbitrary for DenseBitset {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let mut set = [0_u8; CHUNK_BITSET_CONTAINER_SIZE];
+            (0..CHUNK_BITSET_CONTAINER_SIZE).for_each(|x| set[x] = Arbitrary::arbitrary(g));
+            DenseBitset { b: set }
+        }
+    }
+
+    #[quickcheck]
+    fn is_set_returns_true_only_if_the_bit_in_specified_position_is_set(a: DenseBitset) -> bool {
+        (0..(CHUNK_BITSET_CONTAINER_SIZE << 3) as u16).all(|pos| {
+            let query_result = a.is_set(pos);
+            let bitpos = BitmapPosition::from(pos);
+            let is_actually_set = (a.b[bitpos.byte_pos] & (1<<bitpos.bit_pos)) > 0;
+            query_result == is_actually_set
+        })
+    }
+
+    #[quickcheck]
+    fn clearing_results_in_is_set_query_returning_false(mut a: DenseBitset) -> bool {
+        (0..(CHUNK_BITSET_CONTAINER_SIZE << 3) as u16).all(|pos| {
+            a.clear(pos);
+            let after_query_result = a.is_set(pos);
+            after_query_result == false
+        })
+    }
+
+    #[quickcheck]
+    fn setting_results_in_is_set_query_returning_true(mut a: DenseBitset) -> bool {
+        (0..(CHUNK_BITSET_CONTAINER_SIZE << 3) as u16).all(|pos| {
+            a.set(pos);
+            let after_query_result = a.is_set(pos);
+            after_query_result == true
+        })
+    }
+
+    #[quickcheck]
+    fn union_of_two_dense_bitsets_must_have_set_bit_if_any_one_is_set(a: DenseBitset, b: DenseBitset) -> bool {
+        let res = a.union(&b);
+        (0..CHUNK_BITSET_CONTAINER_SIZE).all(|i| a.b[i] | b.b[i] == res.b[i])
+    }
+
+    #[quickcheck]
+    fn intersection_of_two_dense_bitsets_must_have_set_bit_only_if_both_are_set(a: DenseBitset, b:DenseBitset) -> bool {
+        let res = a.intersection(&b);
+        (0..CHUNK_BITSET_CONTAINER_SIZE).all(|i| a.b[i] & b.b[i] == res.b[i])
+    }
+
+    #[quickcheck]
+    fn difference_of_two_dense_bitsets_must_have_set_bit_only_if_left_is_set_and_right_is_not(a: DenseBitset, b: DenseBitset) -> bool {
+        let res = a.difference(&b);
+        (0..CHUNK_BITSET_CONTAINER_SIZE).all(|i| a.b[i] & !b.b[i] == res.b[i])
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_is_set_when_only_one_of_the_sets_has_the_element(a: DenseBitset, b: DenseBitset) -> bool {
+        let res = a.symmetric_difference(&b);
+        (0..CHUNK_BITSET_CONTAINER_SIZE).all(|i| a.b[i] ^ b.b[i] == res.b[i])
     }
 }
 
