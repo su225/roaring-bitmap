@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 
 use std::{cmp, mem};
-
+use std::ops::Deref;
 use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
@@ -60,40 +60,46 @@ impl DenseBitset {
         (self.b[bitmap_pos.byte_pos] & (1<<bitmap_pos.bit_pos)) > 0
     }
 
-    fn count_ones(&self) -> usize {
+    fn len(&self) -> usize {
         self.b.iter().map(|x| x.count_ones() as usize).sum()
     }
 
     fn union(&self, other: &DenseBitset) -> DenseBitset {
-        let res = DenseBitset::new();
+        let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
-            res[i] = self.b[i] | other.b[i];
+            res.b[i] = self.b[i] | other.b[i];
         }
         res
     }
 
     fn intersection(&self, other: &DenseBitset) -> DenseBitset {
-        let res = DenseBitset::new();
+        let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
-            res[i] = self.b[i] & other.b[i];
+            res.b[i] = self.b[i] & other.b[i];
         }
         res
     }
 
     fn difference(&self, other: &DenseBitset) -> DenseBitset {
-        let res = DenseBitset::new();
+        let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
-            res[i] = self.b[i] & !other.b[i];
+            res.b[i] = self.b[i] & !other.b[i];
         }
         res
     }
 
     fn symmetric_difference(&self, other: &DenseBitset) -> DenseBitset {
-        let res = DenseBitset::new();
+        let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
-            res[i] = self.b[i] ^ other.b[i];
+            res.b[i] = self.b[i] ^ other.b[i];
         }
         res
+    }
+}
+
+impl From<[u8; CHUNK_BITSET_CONTAINER_SIZE]> for DenseBitset {
+    fn from(b: [u8; CHUNK_BITSET_CONTAINER_SIZE]) -> Self {
+        DenseBitset { b }
     }
 }
 
@@ -140,8 +146,8 @@ impl Container {
     fn len(&self) -> usize {
         match self {
             Empty => 0,
-            Sparse(s) => s.len(),
-            Dense(d) => d.iter().map(|b| b.count_ones() as usize).sum()
+            Sparse(ref s) => s.len(),
+            Dense(ref d) => d.b.iter().map(|b| b.count_ones() as usize).sum()
         }
     }
 
@@ -157,7 +163,7 @@ impl Container {
     fn into_sparse(self) -> Self {
         match self {
             Empty => Sparse(vec![]),
-            Dense(bitset) => Sparse(bitset.into()),
+            Dense(bitset) => Sparse((*bitset.deref()).into()),
             v => v,
         }
     }
@@ -181,68 +187,25 @@ impl Container {
         match (self, right) {
             (Empty, x) => x.clone(),
             (y, Empty) => y.clone(),
-            (Dense(ref x), Dense(ref y)) => {
-                let mut res = x.clone();
-                for i in 0..CHUNK_BITSET_CONTAINER_SIZE {
-                    res[i] |= y[i];
-                }
-                Dense(res)
-            }
+            (Dense(ref x), Dense(ref y)) => Dense(Box::from(x.union(&y))),
             (Sparse(ref x), Dense(ref y)) => {
                 let mut res = y.clone();
-                for bitpos in x {
-                    let byte_idx = (bitpos >> 3) as usize;
-                    let bit_idx = bitpos & 0b111;
-                    res[byte_idx] |= 1 << bit_idx;
-                }
+                x.into_iter().for_each(|pos| res.set(*pos));
                 Dense(res)
             }
             (Dense(ref x), Sparse(ref y)) => {
                 let mut res = x.clone();
-                for bitpos in y {
-                    let byte_idx = (bitpos >> 3) as usize;
-                    let bit_idx = bitpos & 0b111;
-                    res[byte_idx] |= 1 << bit_idx;
-                }
+                y.into_iter().for_each(|pos| res.set(*pos));
                 Dense(res)
             }
             (Sparse(ref x), Sparse(ref y)) => {
-                // If we are not sure, we assign a dense bitmap
-                // because we can be sure about the upper bound
-                // on the allocated chunk. If it turns out to be
-                // small, we can then allocate a sparse chunk.
-                let mut bitset = [0_u8; CHUNK_BITSET_CONTAINER_SIZE];
-                let mut set_bit = |pos| {
-                    let byte_pos = (pos >> 3) as usize;
-                    let bit_pos = (pos & 0b111) as u8;
-                    bitset[byte_pos] |= 1 << bit_pos;
-                };
-                x.iter().for_each(&mut set_bit);
-                y.iter().for_each(&mut set_bit);
-                let mut bitset_len = 0;
-                for b in bitset {
-                    for i in 0..8 {
-                        if (b & (1 << i)) > 0 {
-                            bitset_len += 1;
-                        }
-                    }
-                }
-                // If the length of the resulting bitset is greater than
-                // or equal to the length of the maximum sparse container
-                // then we return as is because we started with dense.
-                if bitset_len >= MAX_SPARSE_CONTAINER_SIZE {
-                    Dense(Box::new(bitset))
+                let mut dense = DenseBitset::new();
+                x.iter().for_each(|&p| dense.set(p));
+                y.iter().for_each(|&p| dense.set(p));
+                if dense.len() <= MAX_SPARSE_CONTAINER_SIZE {
+                    Sparse(dense.into())
                 } else {
-                    let mut sparse_pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
-                    for i in 0..bitset.len() {
-                        for j in 0..8 {
-                            if (bitset[i] & (1 << j)) > 0 {
-                                let bitpos = ((i << 3) | j) as u16;
-                                sparse_pos.push(bitpos);
-                            }
-                        }
-                    }
-                    Sparse(sparse_pos)
+                    Dense(Box::new(dense))
                 }
             }
         }
@@ -402,7 +365,7 @@ enum ContainerIter<'a> {
     EmptyIter,
     SparseIter(std::slice::Iter<'a, u16>),
     DenseIter {
-        bitset: &'a [u8; CHUNK_BITSET_CONTAINER_SIZE],
+        bitset: &'a DenseBitset,
         byte_pos: usize,
         bit_pos: u8,
     },
