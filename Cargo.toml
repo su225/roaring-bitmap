@@ -10,3 +10,8 @@ authors = ["Suchith J N"]
 pretty_assertions = "1.4.0"
 quickcheck = "1"
 quickcheck_macros = "1"
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "roaring_bitset"
+harness = false
