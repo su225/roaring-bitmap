@@ -163,7 +163,10 @@ impl Container {
     fn into_sparse(self) -> Self {
         match self {
             Empty => Sparse(vec![]),
-            Dense(bitset) => Sparse((*bitset.deref()).into()),
+            Dense(bitset) => {
+                let derefed = bitset.deref().to_owned();
+                Sparse(derefed.into())
+            },
             v => v,
         }
     }
@@ -215,44 +218,18 @@ impl Container {
         match (self, right) {
             (Empty, _) | (_, Empty) => Empty,
             (Dense(ref x), Dense(ref y)) => {
-                let mut intersected = x.clone();
-                let mut intersect_length = 0;
-                for i in 0..y.len() {
-                    intersected[i] |= y[i];
-                    for j in 0..8 {
-                        if (intersected[i] & (1 << j)) > 0 {
-                            intersect_length += 1;
-                        }
-                    }
-                }
-                let res = Dense(intersected);
-                if intersect_length > MAX_SPARSE_CONTAINER_SIZE {
-                    res
+                let res = x.intersection(&y);
+                if res.len() <= MAX_SPARSE_CONTAINER_SIZE {
+                    Sparse(res.into())
                 } else {
-                    res.into_sparse()
+                    Dense(Box::new(res))
                 }
             }
             (Sparse(ref x), Dense(ref y)) => {
-                let mut intersected: Vec<u16> = Vec::with_capacity(x.len());
-                for spos in x {
-                    let byte_pos = (spos >> 3) as usize;
-                    let bit_pos = spos & 0b111;
-                    if (y[byte_pos] & (1 << bit_pos)) > 0 {
-                        intersected.push(*spos);
-                    }
-                }
-                Sparse(intersected)
+                Sparse(x.iter().filter(|pos| y.is_set(**pos)).map(|pos| pos.clone()).collect())
             }
             (Dense(ref x), Sparse(ref y)) => {
-                let mut intersected = Vec::with_capacity(y.len());
-                for spos in y {
-                    let byte_pos = (spos >> 3) as usize;
-                    let bit_pos = spos & 0b111;
-                    if (x[byte_pos] & (1 << bit_pos)) > 0 {
-                        intersected.push(*spos);
-                    }
-                }
-                Sparse(intersected)
+                Sparse(y.iter().filter(|pos| x.is_set(**pos)).map(|pos| pos.clone()).collect())
             }
             (Sparse(ref x), Sparse(ref y)) => {
                 let mut bitpos = Vec::with_capacity(cmp::min(x.len(), y.len()));
@@ -322,39 +299,25 @@ impl Container {
             }
             (Sparse(ref x), Dense(ref y)) => {
                 Sparse((*x).iter()
-                    .filter(|&p| {
-                        let byte_pos = (p >> 3) as usize;
-                        let bit_pos = p & 0b111;
-                        (y[byte_pos] & (1 << bit_pos)) == 0
-                    })
+                    .filter(|&p| y.is_set(*p))
                     .map(|x| *x)
                     .collect::<Vec<u16>>())
             }
             (Dense(ref x), Sparse(ref y)) => {
                 let mut diff_bitset = x.clone();
-                for yp in y {
-                    let byte_pos = (yp >> 3) as usize;
-                    let bit_pos = yp & 0b111;
-                    let bit_mask = !(1 << bit_pos) as u8;
-                    diff_bitset[byte_pos] &= bit_mask;
-                }
-                let res = Dense(diff_bitset);
-                if res.len() < MAX_SPARSE_CONTAINER_SIZE {
-                    res.into_sparse()
+                y.into_iter().for_each(|&p| diff_bitset.clear(p));
+                if diff_bitset.len() < MAX_SPARSE_CONTAINER_SIZE {
+                    Sparse(diff_bitset.deref().to_owned().into())
                 } else {
-                    res
+                    Dense(diff_bitset)
                 }
             }
             (Dense(ref x), Dense(ref y)) => {
-                let mut diff = x.clone();
-                for i in 0..y.len() {
-                    diff[i] &= !y[i];
-                }
-                let res = Dense(diff);
-                if res.len() < MAX_SPARSE_CONTAINER_SIZE {
-                    res.into_sparse()
+                let diff = x.difference(&y);
+                if diff.len() <= MAX_SPARSE_CONTAINER_SIZE {
+                    Sparse(diff.into())
                 } else {
-                    res
+                    Dense(Box::new(diff))
                 }
             }
         }
@@ -366,8 +329,7 @@ enum ContainerIter<'a> {
     SparseIter(std::slice::Iter<'a, u16>),
     DenseIter {
         bitset: &'a DenseBitset,
-        byte_pos: usize,
-        bit_pos: u8,
+        next_pos: usize,
     },
 }
 
@@ -376,11 +338,7 @@ impl<'a> ContainerIter<'a> {
         match container {
             Empty => ContainerIter::EmptyIter,
             Sparse(ref v) => ContainerIter::SparseIter(v.iter()),
-            Dense(ref bitset) => ContainerIter::DenseIter {
-                bitset,
-                byte_pos: 0,
-                bit_pos: 0,
-            }
+            Dense(ref bitset) => ContainerIter::DenseIter { bitset, next_pos: 0 }
         }
     }
 }
@@ -392,42 +350,18 @@ impl<'a> Iterator for ContainerIter<'a> {
         match self {
             ContainerIter::EmptyIter => None,
             ContainerIter::SparseIter(ref mut iter) => iter.next().cloned(),
-            ContainerIter::DenseIter {
-                ref bitset,
-                ref mut byte_pos,
-                ref mut bit_pos,
-            } => {
-                if *byte_pos > bitset.len() {
+            ContainerIter::DenseIter { bitset, ref mut next_pos } => {
+                if *next_pos >= CHUNK_BITSET_CONTAINER_SIZE {
                     return None;
                 }
-                let mut next_val = None;
-                let mut found = false;
-                for by in *byte_pos..bitset.len() {
-                    let cur_byte = bitset[by];
-                    for b in *bit_pos..8 {
-                        if (cur_byte & (1 << b)) == 0 {
-                            continue;
-                        }
-                        next_val = Some(((*byte_pos << 3) as u16) | (*bit_pos as u16));
-                        *bit_pos = b + 1;
-                        found = true;
-                        break;
+                for p in *next_pos..(CHUNK_BITSET_CONTAINER_SIZE<<3) {
+                    if bitset.is_set(p as u16) {
+                        *next_pos = p + 1;
+                        return Some(p as u16);
                     }
-                    if found {
-                        // we found the next set bit. However, we need
-                        // to handle the edge case where the bit pos turns
-                        // to be 8. In this case, we need to advance to the
-                        // next byte for obvious reasons.
-                        debug_assert!(*bit_pos <= 8);
-                        if *bit_pos == 8 {
-                            *bit_pos = 0;
-                            *byte_pos += 1;
-                        }
-                        break;
-                    }
-                    *byte_pos = by;
                 }
-                return next_val;
+                *next_pos = CHUNK_BITSET_CONTAINER_SIZE + 1;
+                return None;
             }
         }
     }
@@ -664,11 +598,7 @@ impl RoaringBitmap {
                         should_convert_to_dense = true;
                     }
                 }
-                Dense(d) => {
-                    let byte_pos = (elem >> 3) as usize;
-                    let bit_pos = (elem & 0b111) as usize;
-                    d[byte_pos] |= 1 << bit_pos;
-                }
+                Dense(d) => { d.set(elem); }
             }
         }
         if should_convert_to_dense {
@@ -695,11 +625,7 @@ impl RoaringBitmap {
                     v.binary_search(&elem)
                         .into_iter().for_each(|idx| { v.remove(idx); });
                 }
-                Dense(ref mut bitset) => {
-                    let byte_pos = (elem >> 3) as usize;
-                    let bit_pos = (elem & 0b111) as usize;
-                    bitset[byte_pos] |= 1 << bit_pos;
-                }
+                Dense(ref mut bitset) => { bitset.clear(elem); }
             }
             if !container.1.is_sparse() && container.1.len() < MAX_SPARSE_CONTAINER_SIZE {
                 needs_sparse_conversion = true;
@@ -1031,8 +957,14 @@ mod dense_bitset_tests {
 
     #[test]
     fn test_union_of_two_bitsets() {
-        let a = DenseBitset::new();
-        let b = DenseBitset::new();
+        let mut a = DenseBitset::new();
+        let mut b = DenseBitset::new();
+        a.set(0);
+        b.set(1);
+        a.set(1);
+        let union = a.union(&b);
+        assert!((union.b[0] & 0b01) > 0);
+        assert!((union.b[0] & 0b10) > 0);
     }
 
     impl Arbitrary for DenseBitset {
