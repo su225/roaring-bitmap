@@ -114,9 +114,9 @@ impl From<Vec<u16>> for DenseBitset {
 impl Into<Vec<u16>> for DenseBitset {
     fn into(self) -> Vec<u16> {
         let mut pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
-        for bitpos in 0..(self.b.len()<<3) as u16 {
-            if self.is_set(bitpos) {
-                pos.push(bitpos);
+        for bitpos in 0..(self.b.len()<<3) {
+            if self.is_set(bitpos as u16) {
+                pos.push(bitpos as u16);
             }
         }
         pos
@@ -193,12 +193,12 @@ impl Container {
             (Dense(ref x), Dense(ref y)) => Dense(Box::from(x.union(&y))),
             (Sparse(ref x), Dense(ref y)) => {
                 let mut res = y.clone();
-                x.into_iter().for_each(|pos| res.set(*pos));
+                x.into_iter().for_each(|&pos| res.set(pos));
                 Dense(res)
             }
             (Dense(ref x), Sparse(ref y)) => {
                 let mut res = x.clone();
-                y.into_iter().for_each(|pos| res.set(*pos));
+                y.into_iter().for_each(|&pos| res.set(pos));
                 Dense(res)
             }
             (Sparse(ref x), Sparse(ref y)) => {
@@ -351,7 +351,7 @@ impl<'a> Iterator for ContainerIter<'a> {
             ContainerIter::EmptyIter => None,
             ContainerIter::SparseIter(ref mut iter) => iter.next().cloned(),
             ContainerIter::DenseIter { bitset, ref mut next_pos } => {
-                if *next_pos >= CHUNK_BITSET_CONTAINER_SIZE {
+                if *next_pos >= (CHUNK_BITSET_CONTAINER_SIZE<<3) {
                     return None;
                 }
                 for p in *next_pos..(CHUNK_BITSET_CONTAINER_SIZE<<3) {
@@ -714,7 +714,8 @@ impl<'a> Iterator for RoaringBitmapIter<'a> {
 mod roaring_bitset_test {
     use pretty_assertions::assert_eq;
 
-    use crate::roaring_bitset::RoaringBitmap;
+    use crate::roaring_bitset::{DenseBitset, RoaringBitmap};
+    use crate::roaring_bitset::Container::Dense;
 
     #[test]
     fn test_basic_set_operations() {
@@ -748,13 +749,15 @@ mod roaring_bitset_test {
 
     #[test]
     fn test_iterator_dense() {
-        let mut bm = RoaringBitmap::new();
-        (0..(1 << 16)).for_each(|x| bm.add(x));
-
-        let mut iter = bm.into_iter();
-        for expected_elem in 0..(1 << 16) {
-            assert_eq!(iter.next(), Some(expected_elem));
-        }
+        let mut bitset = DenseBitset::new();
+        bitset.set(10);
+        bitset.set(100);
+        bitset.set(1<<10);
+        let container = Dense(Box::new(bitset));
+        let mut iter = container.into_iter();
+        assert_eq!(iter.next(), Some(10));
+        assert_eq!(iter.next(), Some(100));
+        assert_eq!(iter.next(), Some(1<<10));
         assert_eq!(iter.next(), None);
     }
 
@@ -767,8 +770,8 @@ mod roaring_bitset_test {
         bm.add(0x0101_beef);
 
         let mut iter = bm.into_iter();
-        for expected_elem in 0..(1 << 16) {
-            assert_eq!(iter.next(), Some(expected_elem));
+        for expected_elem in 0..(1<< 16) {
+            assert_eq!(iter.next(), Some(expected_elem), "expected:{}", expected_elem);
         }
         assert_eq!(iter.next(), Some(0x0101_beef));
         assert_eq!(iter.next(), Some(0x0101_dead));
@@ -967,6 +970,15 @@ mod dense_bitset_tests {
         assert!((union.b[0] & 0b10) > 0);
     }
 
+    #[test]
+    fn test_dense_to_sparse_conversion() {
+        let mut a = DenseBitset::new();
+        a.set(10);
+        a.set(20);
+        let sparse_a: Vec<u16> = a.into();
+        assert_eq!(sparse_a, vec![10, 20]);
+    }
+
     impl Arbitrary for DenseBitset {
         fn arbitrary(g: &mut Gen) -> Self {
             let mut set = [0_u8; CHUNK_BITSET_CONTAINER_SIZE];
@@ -1001,6 +1013,17 @@ mod dense_bitset_tests {
             let after_query_result = a.is_set(pos);
             after_query_result == true
         })
+    }
+
+    #[quickcheck]
+    fn setting_and_is_set_must_be_consistent(pos: u16) -> bool {
+        let mut bitset = DenseBitset::new();
+        let is_set_before = bitset.is_set(pos);
+        bitset.set(pos);
+        let is_set_after = bitset.is_set(pos);
+        bitset.clear(pos);
+        let is_set_after_clearing = bitset.is_set(pos);
+        !is_set_before && is_set_after && !is_set_after_clearing
     }
 
     #[quickcheck]
@@ -1134,9 +1157,9 @@ mod roaring_bitset_property_tests {
     #[quickcheck]
     fn union_must_have_elements_from_both_sets(a: RoaringBitmap, b: RoaringBitmap) -> bool {
         let a_union_b = a.union(&b);
-        let elems_in_a_not_in_union = a.into_iter().all(|x| a_union_b.contains(x));
-        let elems_in_b_not_in_union = b.into_iter().all(|x| a_union_b.contains(x));
-        elems_in_a_not_in_union && elems_in_b_not_in_union
+        let union_has_elements_from_a = a.into_iter().all(|x| a_union_b.contains(x));
+        let union_has_elements_from_b = b.into_iter().all(|x| a_union_b.contains(x));
+        union_has_elements_from_a && union_has_elements_from_b
     }
 
     #[quickcheck]
