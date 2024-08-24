@@ -186,6 +186,20 @@ impl Container {
         }
     }
 
+    fn is_dense(&self) -> bool {
+        match self {
+            Dense(_) => true,
+            _ => false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Empty => true,
+            _ => false,
+        }
+    }
+
     fn union(&self, right: &Container) -> Container {
         match (self, right) {
             (Empty, x) => x.clone(),
@@ -1051,6 +1065,249 @@ mod dense_bitset_tests {
     }
 }
 
+mod container_tests {
+    use Container::{Dense, Empty, Sparse};
+    use crate::roaring_bitset::{Container, DenseBitset, MAX_SPARSE_CONTAINER_SIZE};
+
+    #[test]
+    fn union_between_empty_and_empty() {
+        let e1 = Empty;
+        let e2 = Empty;
+        let union = e1.union(&e2);
+        assert!(union.is_empty());
+    }
+
+    #[test]
+    fn union_between_empty_and_sparse() {
+        let e1 = Empty;
+        let s1 = Sparse(vec![10, 20]);
+        let union_e1_s1 = e1.union(&s1);
+        let union_s1_e1 = s1.union(&e1);
+        assert_eq!(union_e1_s1, Sparse(vec![10, 20]));
+        assert_eq!(union_s1_e1, Sparse(vec![10, 20]));
+        assert!(set_size_invariant(&union_e1_s1));
+        assert!(set_size_invariant(&union_s1_e1));
+    }
+
+    #[test]
+    fn union_between_empty_and_dense() {
+        let e1 = Empty;
+        let d1 = Dense(Box::new(DenseBitset::from(vec![10, 20, 30])));
+        let union_e1_d1 = e1.union(&d1);
+        let union_d1_e1 = d1.union(&e1);
+        assert_eq!(union_e1_d1, Sparse(vec![10, 20, 30]));
+        assert_eq!(union_d1_e1, Sparse(vec![10, 20, 30]));
+    }
+
+    #[test]
+    fn union_between_empty_and_really_dense() {
+        let e1 = Empty;
+        let d1 = Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>())));
+        let e1_union_d1 = e1.union(&d1);
+        let d1_union_e1 = d1.union(&e1);
+        assert_eq!(e1_union_d1, Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>()))));
+        assert_eq!(d1_union_e1, Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>()))));
+    }
+
+    #[test]
+    fn union_between_sparse_and_sparse() {
+        let s1 = Sparse(vec![10, 20]);
+        let s2 = Sparse(vec![20, 30]);
+        let s1_union_s2 = s1.union(&s2);
+        let s2_union_s1 = s2.union(&s1);
+        assert_eq!(s1_union_s2, Sparse(vec![10, 20, 30]));
+        assert_eq!(s2_union_s1, Sparse(vec![10, 20, 30]));
+    }
+
+    #[test]
+    fn union_between_sparse_and_sparse_crossing_the_threshold() {
+        let s1 = Sparse((0..4096).collect());
+        let s2 = Sparse((4096..8192).collect());
+        let s1_union_s2 = s1.union(&s2);
+        let s2_union_s1 = s2.union(&s1);
+        assert_eq!(s1_union_s2, Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>()))));
+        assert_eq!(s2_union_s1, Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>()))));
+    }
+
+    #[test]
+    fn union_between_sparse_and_dense_must_be_always_dense() {
+        let s1 = Sparse(vec![10, 20, 30]);
+        let d1 = Dense(Box::new(DenseBitset::from((4096..9180).collect::<Vec<u16>>())));
+        let s1_union_d1 = s1.union(&d1);
+        let d1_union_s1 = d1.union(&s1);
+        let result = vec![
+            vec![10, 20, 30],
+            (4096..9180).collect::<Vec<u16>>(),
+        ].concat();
+        assert_eq!(s1_union_d1, Dense(Box::new(DenseBitset::from(result.clone()))));
+        assert_eq!(d1_union_s1, Dense(Box::new(DenseBitset::from(result.clone()))));
+    }
+
+    #[test]
+    fn union_between_dense_and_dense_must_always_be_dense_irrespective_of_overlap() {
+        let d1 = Dense(Box::new(DenseBitset::from((4096..10_000).collect::<Vec<u16>>())));
+        let d2 = Dense(Box::new(DenseBitset::from((8192..16_000).collect::<Vec<u16>>())));
+        let d1_union_d2 = d1.union(&d2);
+        let d2_union_d1 = d2.union(&d1);
+        let result = vec![
+            (4096..10_000).collect::<Vec<u16>>(),
+            (8192..16_000).collect::<Vec<u16>>(),
+        ].concat();
+        assert_eq!(d1_union_d2, Dense(Box::new(DenseBitset::from(result.clone()))));
+        assert_eq!(d2_union_d1, Dense(Box::new(DenseBitset::from(result.clone()))));
+    }
+
+    #[test]
+    fn intersection_between_empty_and_empty_must_always_be_empty() {
+        let empty_1 = Empty;
+        let empty_2 = Empty;
+        assert_eq!(empty_1.intersection(&empty_2), Empty);
+        assert_eq!(empty_2.intersection(&empty_1), Empty);
+    }
+
+    #[test]
+    fn intersection_between_empty_and_sparse_must_always_be_empty() {
+        let e1 = Empty;
+        let s1 = Sparse(vec![10, 20, 30]);
+        assert_eq!(e1.intersection(&s1), Empty);
+        assert_eq!(s1.intersection(&e1), Empty);
+    }
+
+    #[test]
+    fn intersection_between_empty_and_dense_must_always_be_empty() {
+        let e1 = Empty;
+        let d1 = Dense(Box::new(DenseBitset::from((0..8192).collect::<Vec<u16>>())));
+        assert_eq!(e1.intersection(&d1), Empty);
+        assert_eq!(d1.intersection(&e1), Empty);
+    }
+
+    #[test]
+    fn intersection_between_sparse_and_sparse_must_be_sparse_when_non_disjoint() {
+        let s1 = Sparse(vec![10, 20, 30]);
+        let s2 = Sparse(vec![20, 30, 40]);
+        assert_eq!(s1.intersection(&s2), Sparse(vec![20, 30]));
+        assert_eq!(s2.intersection(&s1), Sparse(vec![20, 30]));
+    }
+
+    #[test]
+    fn intersection_between_sparse_and_sparse_must_be_empty_when_disjoint() {
+        let s1 = Sparse(vec![10, 20, 30]);
+        let s2 = Sparse(vec![40, 50, 60]);
+        assert_eq!(s1.intersection(&s2), Empty);
+        assert_eq!(s2.intersection(&s1), Empty);
+    }
+
+    #[test]
+    fn intersection_between_sparse_and_dense_must_be_sparse_when_non_disjoint() {
+
+    }
+
+    #[test]
+    fn intersection_between_dense_and_dense_with_lots_of_overlap_could_be_dense() {
+
+    }
+
+    #[test]
+    fn intersection_between_dense_and_dense_with_low_overlap_could_be_sparse() {
+
+    }
+
+    #[test]
+    fn intersection_between_disjoint_sets_must_be_empty() {
+
+    }
+
+    #[test]
+    fn difference_between_empty_and_sparse_must_be_an_empty_set() {
+
+    }
+
+    #[test]
+    fn difference_between_sparse_and_empty_must_be_the_same_sparse_set() {
+
+    }
+
+    #[test]
+    fn difference_between_dense_and_empty_must_be_the_same_dense_set() {
+
+    }
+
+    #[test]
+    fn difference_between_sparse_and_sparse_set_can_only_be_sparse_when_non_disjoint() {
+
+    }
+
+    #[test]
+    fn difference_between_sparse_and_sparse_set_must_be_empty_when_disjoint() {
+
+    }
+
+    #[test]
+    fn difference_between_sparse_and_dense_set_when_non_disjoint_must_be_sparse() {
+
+    }
+
+    #[test]
+    fn difference_between_dense_and_dense_set_when_non_disjoint_with_heavy_overlap_is_sparse() {
+
+    }
+
+    #[test]
+    fn difference_between_dense_and_dense_set_when_non_disjoint_with_light_overlap_is_dense() {
+
+    }
+
+    #[test]
+    fn difference_of_a_set_with_itself_yields_an_empty_set() {
+
+    }
+
+    #[test]
+    fn difference_of_two_disjoint_sets_is_always_the_first_operand() {
+
+    }
+
+    #[test]
+    fn symmetric_difference_of_empty_with_any_other_set_must_be_the_other_set() {
+
+    }
+
+    #[test]
+    fn symmetric_difference_of_two_disjoint_sets_is_their_union() {
+
+    }
+
+    #[test]
+    fn symmetric_difference_of_the_same_two_sets_is_empty() {
+
+    }
+
+    #[test]
+    fn iterate_over_empty_container() {
+
+    }
+
+    #[test]
+    fn iterate_over_sparse_container() {
+
+    }
+
+    #[test]
+    fn iterate_over_dense_container() {
+
+    }
+
+    fn set_size_invariant(r: &Container) -> bool {
+        if r.len() == 0 {
+            r.is_empty()
+        } else if r.len() <= MAX_SPARSE_CONTAINER_SIZE {
+            r.is_sparse()
+        } else {
+            r.is_dense()
+        }
+    }
+}
+
 #[cfg(test)]
 mod roaring_bitset_property_tests {
     use std::collections::{BTreeSet, HashMap, HashSet};
@@ -1289,5 +1546,17 @@ mod roaring_bitset_property_tests {
         let a_union_b = a.union(&b);
         let a_intersection_b = a.intersection(&b);
         a_symdiff_b == a_union_b.difference(&a_intersection_b)
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_with_empty_set_is_the_same_set(a: RoaringBitmap) -> bool {
+        let a_symdiff_empty = a.symmetric_difference(&RoaringBitmap::new());
+        a_symdiff_empty == a
+    }
+
+    #[quickcheck]
+    fn symmetric_difference_with_itself_is_empty(a: RoaringBitmap) -> bool {
+        let a_symdiff_a = a.symmetric_difference(&a);
+        a_symdiff_a.len() == 0
     }
 }
