@@ -6,7 +6,8 @@ use std::ops::Deref;
 use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
-const CHUNK_BITSET_CONTAINER_SIZE: usize = 8192;
+const CHUNK_BITSET_CONTAINER_SIZE: usize = 512;
+const CHUNK_BITSET_BITS_PER_BYTE: usize = 7;
 
 /// `BitmapPosition` is an internal type which converts
 /// the given u16 given to the container into (byte, bit)
@@ -23,8 +24,8 @@ impl From<u16> for BitmapPosition {
     #[inline]
     fn from(value: u16) -> Self {
         BitmapPosition {
-            byte_pos: (value >> 3) as usize,
-            bit_pos: (value & 0b111) as u8,
+            byte_pos: (value >> 7) as usize,
+            bit_pos: (value & 0x7f) as u8,
         }
     }
 }
@@ -38,22 +39,27 @@ impl Into<u16> for BitmapPosition {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct DenseBitset {
-    b: [u8; CHUNK_BITSET_CONTAINER_SIZE],
+    b: [u128; CHUNK_BITSET_CONTAINER_SIZE],
+    le: usize,
 }
 
 impl DenseBitset {
     fn new() -> Self {
-        DenseBitset { b: [0_u8; CHUNK_BITSET_CONTAINER_SIZE] }
+        DenseBitset { b: [0_u128; CHUNK_BITSET_CONTAINER_SIZE], le: 0 }
     }
 
     fn set(&mut self, bit_pos: u16) {
         let bitmap_pos = BitmapPosition::from(bit_pos);
+        let prev = self.b[bitmap_pos.byte_pos];
         self.b[bitmap_pos.byte_pos] |= 1<<bitmap_pos.bit_pos;
+        self.le += ((prev ^ self.b[bitmap_pos.byte_pos]) >> bitmap_pos.bit_pos) as usize;
     }
 
     fn clear(&mut self, bit_pos: u16) {
         let bitmap_pos = BitmapPosition::from(bit_pos);
+        let prev = self.b[bitmap_pos.byte_pos];
         self.b[bitmap_pos.byte_pos] &= !(1<<bitmap_pos.bit_pos);
+        self.le -= ((prev ^ self.b[bitmap_pos.byte_pos]) >> bitmap_pos.bit_pos) as usize;
     }
 
     fn is_set(&self, bit_pos: u16) -> bool {
@@ -62,13 +68,14 @@ impl DenseBitset {
     }
 
     fn len(&self) -> usize {
-        self.b.iter().map(|x| x.count_ones() as usize).sum()
+        self.le
     }
 
     fn union(&self, other: &DenseBitset) -> DenseBitset {
         let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
             res.b[i] = self.b[i] | other.b[i];
+            res.le += res.b[i].count_ones() as usize;
         }
         res
     }
@@ -77,6 +84,7 @@ impl DenseBitset {
         let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
             res.b[i] = self.b[i] & other.b[i];
+            res.le += res.b[i].count_ones() as usize;
         }
         res
     }
@@ -85,6 +93,7 @@ impl DenseBitset {
         let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
             res.b[i] = self.b[i] & !other.b[i];
+            res.le += res.b[i].count_ones() as usize;
         }
         res
     }
@@ -93,14 +102,18 @@ impl DenseBitset {
         let mut res = DenseBitset::new();
         for i in 0..res.b.len() {
             res.b[i] = self.b[i] ^ other.b[i];
+            res.le += res.b[i].count_ones() as usize;
         }
         res
     }
 }
 
-impl From<[u8; CHUNK_BITSET_CONTAINER_SIZE]> for DenseBitset {
-    fn from(b: [u8; CHUNK_BITSET_CONTAINER_SIZE]) -> Self {
-        DenseBitset { b }
+impl From<[u128; CHUNK_BITSET_CONTAINER_SIZE]> for DenseBitset {
+    fn from(b: [u128; CHUNK_BITSET_CONTAINER_SIZE]) -> Self {
+        DenseBitset {
+            b,
+            le: b.iter().map(|&p| p.count_ones() as usize).sum::<usize>(),
+        }
     }
 }
 
@@ -115,7 +128,7 @@ impl From<Vec<u16>> for DenseBitset {
 impl Into<Vec<u16>> for DenseBitset {
     fn into(self) -> Vec<u16> {
         let mut pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
-        for bitpos in 0..(self.b.len()<<3) {
+        for bitpos in 0..(self.b.len()<<CHUNK_BITSET_BITS_PER_BYTE) {
             if self.is_set(bitpos as u16) {
                 pos.push(bitpos as u16);
             }
@@ -378,10 +391,10 @@ impl<'a> Iterator for ContainerIter<'a> {
             ContainerIter::EmptyIter => None,
             ContainerIter::SparseIter(ref mut iter) => iter.next().cloned(),
             ContainerIter::DenseIter { bitset, ref mut next_pos } => {
-                if *next_pos >= (CHUNK_BITSET_CONTAINER_SIZE<<3) {
+                if *next_pos >= (CHUNK_BITSET_CONTAINER_SIZE<<CHUNK_BITSET_BITS_PER_BYTE) {
                     return None;
                 }
-                for p in *next_pos..(CHUNK_BITSET_CONTAINER_SIZE<<3) {
+                for p in *next_pos..(CHUNK_BITSET_CONTAINER_SIZE<<CHUNK_BITSET_BITS_PER_BYTE) {
                     if bitset.is_set(p as u16) {
                         *next_pos = p + 1;
                         return Some(p as u16);
@@ -1009,9 +1022,9 @@ mod dense_bitset_tests {
 
     impl Arbitrary for DenseBitset {
         fn arbitrary(g: &mut Gen) -> Self {
-            let mut set = [0_u8; CHUNK_BITSET_CONTAINER_SIZE];
+            let mut set = [0_u128; CHUNK_BITSET_CONTAINER_SIZE];
             (0..CHUNK_BITSET_CONTAINER_SIZE).for_each(|x| set[x] = Arbitrary::arbitrary(g));
-            DenseBitset { b: set }
+            DenseBitset::from(set)
         }
     }
 
@@ -1086,6 +1099,7 @@ mod dense_bitset_tests {
     }
 }
 
+#[cfg(test)]
 mod container_tests {
     use Container::{Dense, Empty, Sparse};
 
