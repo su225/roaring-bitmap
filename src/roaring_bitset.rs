@@ -6,8 +6,9 @@ use std::ops::Deref;
 use Container::{Dense, Empty, Sparse};
 
 const MAX_SPARSE_CONTAINER_SIZE: usize = 4096;
-const CHUNK_BITSET_CONTAINER_SIZE: usize = 512;
 const CHUNK_BITSET_BITS_PER_BYTE: usize = 7;
+const CHUNK_BITSET_CONTAINER_SIZE: usize = 1<<(16 - CHUNK_BITSET_BITS_PER_BYTE);
+const BIT_POS_MASK: u16 = (1 << CHUNK_BITSET_BITS_PER_BYTE) - 1;
 
 /// `BitmapPosition` is an internal type which converts
 /// the given u16 given to the container into (byte, bit)
@@ -24,8 +25,8 @@ impl From<u16> for BitmapPosition {
     #[inline]
     fn from(value: u16) -> Self {
         BitmapPosition {
-            byte_pos: (value >> 7) as usize,
-            bit_pos: (value & 0x7f) as u8,
+            byte_pos: (value >> CHUNK_BITSET_BITS_PER_BYTE) as usize,
+            bit_pos: (value & BIT_POS_MASK) as u8,
         }
     }
 }
@@ -127,10 +128,15 @@ impl From<Vec<u16>> for DenseBitset {
 
 impl Into<Vec<u16>> for DenseBitset {
     fn into(self) -> Vec<u16> {
-        let mut pos = Vec::with_capacity(MAX_SPARSE_CONTAINER_SIZE);
-        for bitpos in 0..(self.b.len()<<CHUNK_BITSET_BITS_PER_BYTE) {
-            if self.is_set(bitpos as u16) {
-                pos.push(bitpos as u16);
+        let mut pos = Vec::with_capacity(self.le);
+        for byte_pos in 0..self.b.len() {
+            let mut byte = self.b[byte_pos];
+            let base = ((byte_pos * size_of::<u128>()) as u16) << 3;
+            while byte != 0 {
+                let least_set_bit = byte & byte.wrapping_neg();
+                let bit_pos = least_set_bit.trailing_zeros() as u16;
+                pos.push(base + bit_pos);
+                byte = byte ^ least_set_bit;
             }
         }
         pos

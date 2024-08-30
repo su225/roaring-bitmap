@@ -1,11 +1,30 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use criterion::{black_box, Criterion, criterion_group, criterion_main};
+use rand::prelude::SliceRandom;
+use rand::thread_rng;
 use roaring_bitmap::roaring_bitset::RoaringBitmap;
 
 pub fn criterion_add_million_elements(c: &mut Criterion) {
     let mut set = RoaringBitmap::new();
     c.bench_function("add 1 million elements", |b| b.iter_with_large_drop(|| {
         black_box((0..1_000_000).for_each(|x| set.add(x)));
+    }));
+}
+
+pub fn criterion_remove_all_elements(c: &mut Criterion) {
+    let mut elems = (0..2_000_000).collect::<Vec<u32>>();
+    c.bench_function("remove 2 million elements", |b| b.iter_custom(|iters| {
+        let mut total_duration = Duration::ZERO;
+        for _i in 0..iters {
+            let mut set = RoaringBitmap::new();
+            elems.iter().for_each(|x| set.add(*x));
+            elems.shuffle(&mut thread_rng());
+
+            let start = Instant::now();
+            elems.iter().for_each(|x| set.remove(*x));
+            total_duration += start.elapsed();
+        }
+        total_duration
     }));
 }
 
@@ -63,6 +82,7 @@ pub fn criterion_symmetric_difference_of_two_sets_containing_ten_million_element
 
 criterion_group!(benches,
     criterion_add_million_elements,
+    criterion_remove_all_elements,
     criterion_lookup_from_set_of_billion_elements,
     criterion_union_of_two_sets_containing_ten_million_elements,
     criterion_intersection_of_two_sets_containing_ten_million_elements,

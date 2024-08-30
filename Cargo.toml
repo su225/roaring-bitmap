@@ -11,6 +11,7 @@ pretty_assertions = "1.4.0"
 quickcheck = "1"
 quickcheck_macros = "1"
 criterion = { version = "0.5.1", features = ["html_reports"] }
+rand = "0.8.5"
 
 [[bench]]
 name = "roaring_bitset"
